@@ -80,10 +80,10 @@ lib/features/yoga_mirror/
 ## Retarget (prototype)
 JS nhận `PoseFrame` JSON, map landmarks → VRM humanoid bones:
 - Ưu tiên `wx/wy/wz` (world coord), fallback `xNorm/yNorm`
-- Thử **Kalidokit Pose.solve** nếu CDN load được
-- Fallback **custom solver**: vector landmark → quaternion bone
-- Bones: hips, spine, chest, neck, head, arms, legs, feet
-- **Retarget hiện là prototype** — cần tune scale/rotation/coordinate mapping
+- Chỉ dùng **custom solver** cho phase đầu, không động vào render/opacity/camera nữa
+- Bones: hips, spine, chest, neck, head, arms, legs
+- Retarget theo từng phase: torso → arms → legs
+- **Render VRM neutral đã đúng**; phần này chỉ tập trung vào mapping/rotation, không sửa UI/render nữa
 
 ## Quyết định kỹ thuật
 1. JSON `timestampMs` điều khiển timeline — play/pause/speed/slider ở Flutter
@@ -91,6 +91,31 @@ JS nhận `PoseFrame` JSON, map landmarks → VRM humanoid bones:
 3. VRM opacity ~0.45–0.65, renderer alpha transparent
 4. Score vẫn tính bằng góc khớp ML Kit vs JSON (không đổi)
 5. CDN: three.js, @pixiv/three-vrm, kalidokit — cần internet lần đầu
+6. WebView: HTML/JS inject inline qua `rootBundle`, không fetch Flutter asset path trực tiếp
+7. Error handling: JS bắt lỗi CDN (error/unhandledrejection) + lỗi parse VRM, gửi về Flutter qua `YogaMirrorBridge`
+
+## Lỗi thường gặp — VRM không load được
+1. **CDN không có mạng**: Three.js/three-vrm/kalidokit import fail → báo "Failed to load CDN dependency"
+2. **Asset path sai**: `pubspec.yaml` thiếu `assets/models/` hoặc tên file không khớp `AppAssets`
+3. **File VRM lỗi/không đúng format**: Three.js GLTFLoader báo lỗi parse
+4. **WebView resource bị chặn**: iOS WKWebView policy, cần dùng `loadHtmlString`
+
+## Trạng thái hiện tại
+- ✅ VRM đã load được qua rootBundle + base64 chunked
+- 🔄 Model display: đã normalize center/scale/camera, đang tuning
+- 🔄 Retarget JSON → VRM bones: đã chia pipeline torso → arms → legs
+- 🔄 Score: thêm full-body detection validation, chỉ tính điểm khi đủ landmarks
+
+## Các phase sửa lỗi
+1. **Phase 1 (done)**: Normalize VRM display — center model, scale, camera, neutral pose
+2. **Phase 2 (in progress)**: Retarget JSON → bones — mirror toggle, smoothing, grouped body parts
+3. **Phase 3**: Score validation — full-body check, feedback cải thiện
+4. **Phase 4**: Tuning — bone mapping, coordinate system, scale/position calibration
+
+## Lưu ý
+- Score `--` hoặc 0% có thể do camera chưa thấy toàn thân.
+- Cần đặt điện thoại xa 2-3m, thấy từ đầu tới chân để score hoạt động.
+- `enableRetarget = true` sau khi VRM load xong 500ms, tránh retarget lúc model chưa ổn định.
 
 ## Việc tiếp theo
 - Tune bone mapping / coordinate system cho retarget chính xác hơn

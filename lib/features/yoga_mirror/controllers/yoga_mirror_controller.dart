@@ -13,11 +13,11 @@ class YogaMirrorController extends ChangeNotifier {
     PoseMatchingService? matchingService,
     PoseFeedbackService? feedbackService,
     this.simulatorMode = false,
-  })  : _loader = loader ?? PoseJsonAssetLoader(),
-        _matchingService = matchingService ?? PoseMatchingService(),
-        _feedbackService = feedbackService ?? PoseFeedbackService(),
-        poseDetectionSupported = !kIsWeb && !simulatorMode,
-        scoreLabel = _initialScoreLabel(simulatorMode);
+  }) : _loader = loader ?? PoseJsonAssetLoader(),
+       _matchingService = matchingService ?? PoseMatchingService(),
+       _feedbackService = feedbackService ?? PoseFeedbackService(),
+       poseDetectionSupported = !kIsWeb && !simulatorMode,
+       scoreLabel = _initialScoreLabel(simulatorMode);
 
   final PoseJsonAssetLoader _loader;
   final PoseMatchingService _matchingService;
@@ -126,12 +126,30 @@ class YogaMirrorController extends ChangeNotifier {
 
   List<String> _initialFeedback() {
     if (simulatorMode) {
-      return ['Simulator: xem VRM + JSON animation. Chấm điểm cần iPhone thật.'];
+      return [
+        'Simulator: xem VRM + JSON animation. Chấm điểm cần iPhone thật.',
+      ];
     }
     if (!poseDetectionSupported) {
       return ['Chỉ hỗ trợ chấm điểm trên iOS/Android'];
     }
     return ['Đứng vào khung hình để bắt đầu kiểm tra'];
+  }
+
+  /// Landmark indices for full-body detection validation
+  static const _fullBodyIndices = {11, 12, 23, 24, 25, 26, 27, 28};
+  static const _torsoIndices = {11, 12, 23, 24};
+
+  bool _hasFullBody(Map<int, PoseMatchPoint> landmarks) {
+    return _fullBodyIndices.every(
+      (i) => landmarks.containsKey(i) && landmarks[i]!.visibility >= 0.3,
+    );
+  }
+
+  bool _hasTorso(Map<int, PoseMatchPoint> landmarks) {
+    return _torsoIndices.every(
+      (i) => landmarks.containsKey(i) && landmarks[i]!.visibility >= 0.3,
+    );
   }
 
   void onUserLandmarks(Map<int, PoseMatchPoint>? landmarks) {
@@ -147,12 +165,33 @@ class YogaMirrorController extends ChangeNotifier {
         userDetected: false,
         poseDetectionSupported: true,
         angleDiffs: const {},
+        bodyStatus: 'none',
       );
       notifyListeners();
       return;
     }
 
     userDetected = true;
+
+    if (!_hasFullBody(landmarks)) {
+      String bodyStatus;
+      if (!_hasTorso(landmarks)) {
+        bodyStatus = 'no_torso';
+      } else {
+        bodyStatus = 'partial';
+      }
+      scoreLabel = '--';
+      feedback = _feedbackService.buildFeedback(
+        score: 0,
+        userDetected: true,
+        poseDetectionSupported: true,
+        angleDiffs: const {},
+        bodyStatus: bodyStatus,
+      );
+      notifyListeners();
+      return;
+    }
+
     final result = _matchingService.compare(
       sampleFrame: currentSampleFrame!,
       userLandmarks: landmarks,
@@ -167,6 +206,7 @@ class YogaMirrorController extends ChangeNotifier {
       userDetected: true,
       poseDetectionSupported: true,
       angleDiffs: result.angleDiffs,
+      bodyStatus: 'full',
     );
 
     notifyListeners();
@@ -176,7 +216,10 @@ class YogaMirrorController extends ChangeNotifier {
     if (frames.isEmpty || durationMs <= 0) {
       return 0;
     }
-    return ((currentTimeMs - frames.first.timestampMs) / durationMs).clamp(0, 1);
+    return ((currentTimeMs - frames.first.timestampMs) / durationMs).clamp(
+      0,
+      1,
+    );
   }
 
   PoseFrame _frameAtTime(int timeMs) {

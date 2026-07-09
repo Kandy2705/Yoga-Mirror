@@ -29,6 +29,7 @@ class _YogaMirrorDemoScreenState extends State<YogaMirrorDemoScreen>
   late final YogaMirrorController _controller;
   Ticker? _ticker;
   Duration? _lastTick;
+  bool _debugOverlayEnabled = false;
 
   @override
   void initState() {
@@ -158,6 +159,17 @@ class _YogaMirrorDemoScreenState extends State<YogaMirrorDemoScreen>
             onPressed: () => Navigator.of(context).maybePop(),
             icon: const Icon(Icons.arrow_back_ios_new, color: Colors.white),
           ),
+          IconButton(
+            onPressed: () =>
+                setState(() => _debugOverlayEnabled = !_debugOverlayEnabled),
+            icon: Icon(
+              Icons.bug_report,
+              color: _debugOverlayEnabled
+                  ? const Color(0xFFB388FF)
+                  : Colors.white54,
+            ),
+            tooltip: 'Debug overlay',
+          ),
           Expanded(
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
@@ -231,8 +243,9 @@ class _YogaMirrorDemoScreenState extends State<YogaMirrorDemoScreen>
                 VrmModelWebView(
                   modelAssetPath: AppAssets.yogaAvatarVrm,
                   currentFrame: _controller.currentSampleFrame,
-                  opacity: 0.55,
+                  opacity: 0.65,
                   isPlaying: _controller.isPlaying,
+                  debugOverlayEnabled: _debugOverlayEnabled,
                 ),
               ],
             ),

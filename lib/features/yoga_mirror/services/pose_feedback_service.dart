@@ -4,6 +4,7 @@ class PoseFeedbackService {
     required bool userDetected,
     required bool poseDetectionSupported,
     required Map<String, double> angleDiffs,
+    String bodyStatus = 'none',
   }) {
     if (!poseDetectionSupported) {
       return ['Chỉ hỗ trợ chấm điểm trên iOS/Android'];
@@ -11,6 +12,17 @@ class PoseFeedbackService {
 
     if (!userDetected) {
       return ['Đứng vào khung hình để bắt đầu kiểm tra'];
+    }
+
+    if (bodyStatus == 'no_torso') {
+      return [
+        'Vui lòng đặt điện thoại xa hơn để thấy toàn thân.',
+        'Cần thấy vai, hông, gối và chân để chấm điểm.',
+      ];
+    }
+
+    if (bodyStatus == 'partial') {
+      return ['Chưa thấy đủ chân và gối.', 'Lùi xa để camera thấy toàn thân.'];
     }
 
     if (score > 85) {

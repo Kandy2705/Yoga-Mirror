@@ -36,6 +36,33 @@
     }
   }
   </script>
+  <script>
+  window.addEventListener('error', function(e) {
+    var msg = e.message || '';
+    if (msg.includes('three') || msg.includes('vrm') || msg.includes('kalidokit') || msg.includes('cdn') || msg.includes('jsdelivr') || msg.includes('esm.sh')) {
+      if (window.YogaMirrorBridge && window.YogaMirrorBridge.postMessage) {
+        window.YogaMirrorBridge.postMessage(JSON.stringify({
+          type: 'error',
+          message: 'Failed to load CDN dependency. Check internet.',
+          detail: msg
+        }));
+      }
+    }
+  }, true);
+
+  window.addEventListener('unhandledrejection', function(e) {
+    var msg = e.reason ? (e.reason.message || String(e.reason)) : '';
+    if (msg.includes('three') || msg.includes('kalidokit') || msg.includes('vrm')) {
+      if (window.YogaMirrorBridge && window.YogaMirrorBridge.postMessage) {
+        window.YogaMirrorBridge.postMessage(JSON.stringify({
+          type: 'error',
+          message: 'Failed to load module dependency. Check internet.',
+          detail: msg
+        }));
+      }
+    }
+  });
+  </script>
 </head>
 <body>
   <canvas id="canvas"></canvas>
