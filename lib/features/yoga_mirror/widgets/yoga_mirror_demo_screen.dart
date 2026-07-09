@@ -6,8 +6,6 @@ import '../controllers/yoga_mirror_controller.dart';
 import '../services/pose_stream_processor.dart';
 import 'camera_pose_view.dart';
 import 'playback_controls.dart';
-import 'pose_feedback_panel.dart';
-import 'pose_score_card.dart';
 import 'vrm_model_webview.dart';
 
 class YogaMirrorDemoScreen extends StatefulWidget {
@@ -30,6 +28,10 @@ class _YogaMirrorDemoScreenState extends State<YogaMirrorDemoScreen>
   Ticker? _ticker;
   Duration? _lastTick;
   bool _debugOverlayEnabled = false;
+  bool _mappingToolEnabled = false;
+  /// 0=off, 1=vrm (modal bones), 2=json, 3=all
+  int _idLabelModeIndex = 0;
+  static const _idLabelModes = ['off', 'vrm', 'json', 'all'];
 
   @override
   void initState() {
@@ -86,14 +88,6 @@ class _YogaMirrorDemoScreenState extends State<YogaMirrorDemoScreen>
         _buildHeader(),
         Expanded(child: _buildCameraStack()),
         Padding(
-          padding: const EdgeInsets.fromLTRB(16, 8, 16, 0),
-          child: PoseScoreCard(scoreLabel: _controller.scoreLabel),
-        ),
-        Padding(
-          padding: const EdgeInsets.fromLTRB(16, 8, 16, 0),
-          child: PoseFeedbackPanel(messages: _controller.feedback),
-        ),
-        Padding(
           padding: const EdgeInsets.all(16),
           child: PlaybackControls(
             isPlaying: _controller.isPlaying,
@@ -126,13 +120,6 @@ class _YogaMirrorDemoScreenState extends State<YogaMirrorDemoScreen>
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
-                PoseScoreCard(scoreLabel: _controller.scoreLabel),
-                const SizedBox(height: 12),
-                Expanded(
-                  child: SingleChildScrollView(
-                    child: PoseFeedbackPanel(messages: _controller.feedback),
-                  ),
-                ),
                 const SizedBox(height: 12),
                 PlaybackControls(
                   isPlaying: _controller.isPlaying,
@@ -170,17 +157,54 @@ class _YogaMirrorDemoScreenState extends State<YogaMirrorDemoScreen>
             ),
             tooltip: 'Debug overlay',
           ),
+          IconButton(
+            onPressed: () =>
+                setState(() => _mappingToolEnabled = !_mappingToolEnabled),
+            icon: Icon(
+              Icons.account_tree_outlined,
+              color: _mappingToolEnabled
+                  ? const Color(0xFFB388FF)
+                  : Colors.white54,
+            ),
+            tooltip: 'Bone mapping tool',
+          ),
+          IconButton(
+            onPressed: () => setState(() {
+              _idLabelModeIndex =
+                  (_idLabelModeIndex + 1) % _idLabelModes.length;
+            }),
+            icon: Icon(
+              Icons.tag,
+              color: switch (_idLabelModeIndex) {
+                1 => const Color(0xFFB388FF), // VRM / modal
+                2 => const Color(0xFF7FDBFF), // JSON
+                3 => const Color(0xFFFFD54F), // all
+                _ => Colors.white54,
+              },
+            ),
+            tooltip: switch (_idLabelModeIndex) {
+              1 => 'ID labels: VRM (tap → JSON)',
+              2 => 'ID labels: JSON (tap → all)',
+              3 => 'ID labels: all (tap → off)',
+              _ => 'ID labels: off (tap → VRM)',
+            },
+          ),
           Expanded(
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Text(
-                  'YogaMirror',
-                  style: TextStyle(
-                    color: Colors.white,
-                    fontSize: compact ? 18 : 22,
-                    fontWeight: FontWeight.w700,
-                  ),
+                Row(
+                  children: [
+                    Text(
+                      'YogaMirror',
+                      style: TextStyle(
+                        color: Colors.white,
+                        fontSize: compact ? 18 : 22,
+                        fontWeight: FontWeight.w700,
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                  ],
                 ),
                 Text(
                   _controller.exerciseName,
@@ -196,7 +220,6 @@ class _YogaMirrorDemoScreenState extends State<YogaMirrorDemoScreen>
       ),
     );
   }
-
   Widget _buildCameraStack() {
     if (_controller.isLoading) {
       return const Center(
@@ -246,6 +269,8 @@ class _YogaMirrorDemoScreenState extends State<YogaMirrorDemoScreen>
                   opacity: 0.65,
                   isPlaying: _controller.isPlaying,
                   debugOverlayEnabled: _debugOverlayEnabled,
+                  mappingToolEnabled: _mappingToolEnabled,
+                  idLabelMode: _idLabelModes[_idLabelModeIndex],
                 ),
               ],
             ),

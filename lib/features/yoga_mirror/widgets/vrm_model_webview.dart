@@ -27,6 +27,9 @@ class VrmModelWebView extends StatefulWidget {
     this.opacity = 0.65,
     this.isPlaying = false,
     this.debugOverlayEnabled = false,
+    this.mappingToolEnabled = false,
+    this.idLabelMode = 'off',
+    this.onWebViewCreated,
   });
 
   final String modelAssetPath;
@@ -34,6 +37,11 @@ class VrmModelWebView extends StatefulWidget {
   final double opacity;
   final bool isPlaying;
   final bool debugOverlayEnabled;
+  /// Dev tool: show JS panel to pair VRM bones ↔ JSON landmarks by name.
+  final bool mappingToolEnabled;
+  /// On-screen id labels: `off` | `vrm` | `json` | `all`.
+  final String idLabelMode;
+  final void Function(WebViewController controller)? onWebViewCreated;
 
   @override
   State<VrmModelWebView> createState() => _VrmModelWebViewState();
@@ -73,6 +81,12 @@ class _VrmModelWebViewState extends State<VrmModelWebView> {
     }
     if (widget.debugOverlayEnabled != oldWidget.debugOverlayEnabled) {
       _setDebugOverlay(widget.debugOverlayEnabled);
+    }
+    if (widget.mappingToolEnabled != oldWidget.mappingToolEnabled) {
+      _setMappingToolEnabled(widget.mappingToolEnabled);
+    }
+    if (widget.idLabelMode != oldWidget.idLabelMode) {
+      _setIdLabelMode(widget.idLabelMode);
     }
   }
 
@@ -114,6 +128,9 @@ class _VrmModelWebViewState extends State<VrmModelWebView> {
 
       final html = await _buildHtmlDocument();
       await controller.loadHtmlString(html);
+
+      // expose controller to parent if requested
+      widget.onWebViewCreated?.call(controller);
 
       if (!mounted) return;
       setState(() => _controller = controller);
@@ -163,6 +180,8 @@ class _VrmModelWebViewState extends State<VrmModelWebView> {
           _setRetargetEnabled(true);
           _setRetargetParts(const {'torso': true, 'arms': true, 'legs': true});
           if (widget.debugOverlayEnabled) _setDebugOverlay(true);
+          if (widget.mappingToolEnabled) _setMappingToolEnabled(true);
+          if (widget.idLabelMode != 'off') _setIdLabelMode(widget.idLabelMode);
           _flushPendingFrame();
         case 'error':
           final msg = data['message'] as String? ?? 'Không tải được VRM model.';
@@ -176,6 +195,18 @@ class _VrmModelWebViewState extends State<VrmModelWebView> {
           }
         case 'loading_step':
           debugPrint('[VrmModelWebView] JS step: ${data['step']}');
+        case 'bone_mapping_result':
+          final mapping = data['mapping'] as Map<String, dynamic>? ?? {};
+          final mappingWithIds =
+              data['mappingWithIds'] as Map<String, dynamic>? ?? {};
+          debugPrint('[BoneMapping] Kết quả mapping thủ công (names):');
+          debugPrint(const JsonEncoder.withIndent('  ').convert(mapping));
+          if (mappingWithIds.isNotEmpty) {
+            debugPrint('[BoneMapping] Kết quả mapping (with ids):');
+            debugPrint(
+              const JsonEncoder.withIndent('  ').convert(mappingWithIds),
+            );
+          }
       }
     } catch (error) {
       debugPrint('[VrmModelWebView] bridge parse error: $error');
@@ -343,6 +374,28 @@ class _VrmModelWebViewState extends State<VrmModelWebView> {
     }
   }
 
+  Future<void> _setMappingToolEnabled(bool enabled) async {
+    if (_controller == null || !_vrmLoaded) return;
+    try {
+      await _controller!.runJavaScript(
+        'window.setMappingToolEnabled(${enabled ? 'true' : 'false'})',
+      );
+    } catch (error) {
+      debugPrint('[VrmModelWebView] setMappingToolEnabled error: $error');
+    }
+  }
+
+  Future<void> _setIdLabelMode(String mode) async {
+    if (_controller == null || !_vrmLoaded) return;
+    try {
+      await _controller!.runJavaScript(
+        'window.setIdLabelMode(${jsonEncode(mode)})',
+      );
+    } catch (error) {
+      debugPrint('[VrmModelWebView] setIdLabelMode error: $error');
+    }
+  }
+
   String _loadStepText() {
     switch (_loadStep) {
       case _LoadStep.initializing:
@@ -380,9 +433,14 @@ class _VrmModelWebViewState extends State<VrmModelWebView> {
     }
 
     if (_loadStep == _LoadStep.ready && _controller != null) {
+      // Allow pointer only when mapping tool is open so the panel receives taps.
+      // Otherwise keep IgnorePointer so camera/pose gestures pass through.
       return Opacity(
         opacity: widget.opacity,
-        child: IgnorePointer(child: WebViewWidget(controller: _controller!)),
+        child: IgnorePointer(
+          ignoring: !widget.mappingToolEnabled,
+          child: WebViewWidget(controller: _controller!),
+        ),
       );
     }
 

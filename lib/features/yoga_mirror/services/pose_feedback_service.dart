@@ -11,7 +11,8 @@ class PoseFeedbackService {
     }
 
     if (!userDetected) {
-      return ['Đứng vào khung hình để bắt đầu kiểm tra'];
+      // Don't show the initial "stand in frame" instruction — keep UI clean.
+      return [];
     }
 
     if (bodyStatus == 'no_torso') {

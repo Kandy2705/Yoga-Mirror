@@ -133,7 +133,8 @@ class YogaMirrorController extends ChangeNotifier {
     if (!poseDetectionSupported) {
       return ['Chỉ hỗ trợ chấm điểm trên iOS/Android'];
     }
-    return ['Đứng vào khung hình để bắt đầu kiểm tra'];
+    // Hide the "stand in frame" instruction by default to maximize central view.
+    return [];
   }
 
   /// Landmark indices for full-body detection validation
