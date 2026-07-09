@@ -124,6 +124,10 @@ class _VrmModelWebViewState extends State<VrmModelWebView> {
         final webKit = controller.platform as WebKitWebViewController;
         await webKit.setAllowsBackForwardNavigationGestures(false);
         await webKit.setBackgroundColor(Colors.transparent);
+        // iOS 16.4+: without this, Safari → Phát triển → Kandy shows
+        // "Không có ứng dụng có thể kiểm tra web" (no YogaMirror entry).
+        await webKit.setInspectable(true);
+        debugPrint('[VrmModelWebView] setInspectable(true) OK');
       }
 
       final html = await _buildHtmlDocument();
@@ -179,18 +183,23 @@ class _VrmModelWebViewState extends State<VrmModelWebView> {
           _setPlaybackState(widget.isPlaying);
           _setRetargetEnabled(true);
           _setRetargetParts(const {'torso': true, 'arms': true, 'legs': true});
+          // Yaw/pitch live in JS (guideModelYaw / guideModelPitch) — no UI slider.
           if (widget.debugOverlayEnabled) _setDebugOverlay(true);
           if (widget.mappingToolEnabled) _setMappingToolEnabled(true);
           if (widget.idLabelMode != 'off') _setIdLabelMode(widget.idLabelMode);
           _flushPendingFrame();
         case 'error':
           final msg = data['message'] as String? ?? 'Không tải được VRM model.';
+          final detail = data['detail'] as String?;
           debugPrint('[VrmModelWebView] JS error: $msg');
+          if (detail != null && detail.isNotEmpty) {
+            debugPrint('[VrmModelWebView] JS error detail: $detail');
+          }
           if (mounted) {
             setState(() {
               _loadStep = _LoadStep.error;
               _errorMessage = msg;
-              _errorDetail = data['detail'] as String?;
+              _errorDetail = detail;
             });
           }
         case 'loading_step':

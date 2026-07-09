@@ -16,10 +16,30 @@ let enableRetarget = false;
 let mirrorGuide = false;
 let retargetParts = { torso: true, arms: true, legs: true };
 const rotationSmoothing = 0.4;
+// ─── Guide display tuning (edit these numbers — no UI slider) ───────────────
 let guideModelScale = 0.7;
-let guideModelYOffset = 1.3;
-let guideModelZOffset = 0.0;
-let guideModelYaw = Math.PI;
+let guideModelYOffset = 1;  // up/down (lower = model sits lower in frame)
+let guideModelZOffset = 0.0;   // toward/away camera
+// Face user (this VRM shows back at 0). Change only if facing wrong again.
+let guideModelYaw = Math.PI;   // radians around Y (π = 180°)
+// If model leans too far FORWARD toward camera, try small NEGATIVE pitch
+// e.g. -0.08 … -0.15. If leans BACK, try small positive.
+let guideModelPitch = 0;    // radians around X (tilt)
+
+// Camera: eye-level toward model (not high bird's-eye).
+// Raise camY ≈ lookY for flatter view; lower lookY = look down more.
+const CAMERA_FOV = 35;
+const CAMERA_POS = { x: 0, y: 0.95, z: 2.7 };   // viewer height / distance
+const CAMERA_LOOK = { x: 0, y: 0.95, z: 0 };    // aim at mid/upper body (level)
+
+function applyGuideRootTransform() {
+  if (!guideRoot) return;
+  guideRoot.position.set(0, guideModelYOffset, guideModelZOffset);
+  // order YXZ: yaw then pitch feels natural for "stand and tip"
+  guideRoot.rotation.order = 'YXZ';
+  guideRoot.rotation.set(guideModelPitch, guideModelYaw, 0);
+  guideRoot.scale.setScalar(1);
+}
 
 // ─── Scene state ───────────────────────────────────────────────────────────
 const canvas = document.getElementById('canvas');
@@ -123,9 +143,9 @@ function initScene() {
   renderer.outputColorSpace = THREE.SRGBColorSpace;
 
   scene = new THREE.Scene();
-  camera = new THREE.PerspectiveCamera(30, 1, 0.1, 20);
-  camera.position.set(0, 0.9, 3.0);
-  camera.lookAt(0, 0.7, 0);
+  camera = new THREE.PerspectiveCamera(CAMERA_FOV, 1, 0.1, 20);
+  camera.position.set(CAMERA_POS.x, CAMERA_POS.y, CAMERA_POS.z);
+  camera.lookAt(CAMERA_LOOK.x, CAMERA_LOOK.y, CAMERA_LOOK.z);
 
   scene.add(new THREE.AmbientLight(0xffffff, 0.85));
   const key = new THREE.DirectionalLight(0xfff0ff, 1.1);
@@ -154,6 +174,7 @@ function onResize() {
 function animate() {
   animationId = requestAnimationFrame(animate);
   if (vrm) vrm.update(clock.getDelta());
+  applyGuideRootTransform();
   if (debugSkeletonEnabled || idLabelMode !== 'off') {
     updateDebugVisuals(lastFrame);
   }
@@ -162,7 +183,18 @@ function animate() {
 
 // ─── Model normalization ──────────────────────────────────────────────────────
 function normalizeVrmModel(vrmModel) {
+  if (!vrmModel?.scene) throw new Error('normalizeVrmModel: vrm.scene missing');
+
+  // Force matrix update before bounds (safer after GPU re-init / large meshes)
+  vrmModel.scene.updateMatrixWorld(true);
+
   const box = new THREE.Box3().setFromObject(vrmModel.scene);
+  if (box.isEmpty()) {
+    console.warn('[YogaVRM] Empty bbox — skip center/scale');
+    applyGuideRootTransform();
+    return;
+  }
+
   const size = new THREE.Vector3();
   const center = new THREE.Vector3();
   box.getSize(size);
@@ -177,14 +209,12 @@ function normalizeVrmModel(vrmModel) {
   debugRecenterOffset.copy(center);
   debugScaleFactor = scale * guideModelScale;
 
-  if (guideRoot) {
-    guideRoot.position.set(0, guideModelYOffset, guideModelZOffset);
-    guideRoot.rotation.y = guideModelYaw;
-    guideRoot.scale.setScalar(1);
-  }
+  applyGuideRootTransform();
 
-  camera.position.set(0, 0.9, 3.0);
-  camera.lookAt(0, 0.7, 0);
+  if (camera) {
+    camera.position.set(CAMERA_POS.x, CAMERA_POS.y, CAMERA_POS.z);
+    camera.lookAt(CAMERA_LOOK.x, CAMERA_LOOK.y, CAMERA_LOOK.z);
+  }
 
   console.log('[YogaVRM] Model normalized:',
     'size', size.x.toFixed(3), size.y.toFixed(3), size.z.toFixed(3),
@@ -193,9 +223,50 @@ function normalizeVrmModel(vrmModel) {
 }
 
 // ─── VRM load ─────────────────────────────────────────────────────────────────
-async function loadVrmFromBase64Internal(base64) {
+function ensureRendererAlive() {
+  // WKWebView may idle-exit GPU process; recreate WebGL renderer only (keep scene).
+  let gl = null;
   try {
-    reportStep('decoding_base64');
+    gl = renderer ? renderer.getContext() : null;
+  } catch (_) {
+    gl = null;
+  }
+  const lost = !renderer || !gl || (typeof gl.isContextLost === 'function' && gl.isContextLost());
+  if (!lost) return;
+
+  console.warn('[YogaVRM] WebGL context lost — recreating renderer');
+  try {
+    if (renderer) renderer.dispose();
+  } catch (_) { /* ignore */ }
+
+  if (!canvas) throw new Error('canvas element missing');
+  renderer = new THREE.WebGLRenderer({
+    canvas, alpha: true, antialias: true, premultipliedAlpha: false,
+  });
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+  renderer.setClearColor(0x000000, 0);
+  renderer.outputColorSpace = THREE.SRGBColorSpace;
+  onResize();
+
+  if (!scene) {
+    scene = new THREE.Scene();
+    scene.add(new THREE.AmbientLight(0xffffff, 0.85));
+    const key = new THREE.DirectionalLight(0xfff0ff, 1.1);
+    key.position.set(1, 2, 2);
+    scene.add(key);
+  }
+  if (!camera) {
+    camera = new THREE.PerspectiveCamera(CAMERA_FOV, 1, 0.1, 20);
+    camera.position.set(CAMERA_POS.x, CAMERA_POS.y, CAMERA_POS.z);
+    camera.lookAt(CAMERA_LOOK.x, CAMERA_LOOK.y, CAMERA_LOOK.z);
+  }
+}
+
+async function loadVrmFromBase64Internal(base64) {
+  let step = 'start';
+  try {
+    step = 'decoding_base64';
+    reportStep(step);
     setStatus('Đang parse VRM...');
     const binary = atob(base64);
     const bytes = new Uint8Array(binary.length);
@@ -203,37 +274,45 @@ async function loadVrmFromBase64Internal(base64) {
     const blob = new Blob([bytes], { type: 'application/octet-stream' });
     const url = URL.createObjectURL(blob);
 
-    reportStep('loading_vrm_gltf');
+    step = 'loading_vrm_gltf';
+    reportStep(step);
     const loader = new GLTFLoader();
     loader.register((parser) => new VRMLoaderPlugin(parser));
     const gltf = await loader.loadAsync(url);
     URL.revokeObjectURL(url);
 
     if (vrm) {
-      VRMUtils.deepDispose(vrm.scene);
-      if (guideRoot) scene.remove(guideRoot);
+      try { VRMUtils.deepDispose(vrm.scene); } catch (_) { /* ignore */ }
+      if (guideRoot && scene) scene.remove(guideRoot);
     }
 
     vrm = gltf.userData.vrm;
-    if (!vrm) throw new Error('File is not a valid VRM');
-    reportStep('vrm_parsed');
+    if (!vrm) throw new Error('File is not a valid VRM (userData.vrm missing)');
+    step = 'vrm_parsed';
+    reportStep(step);
     console.log('[YogaVRM] VRM loaded');
 
-    // three-vrm v2.x auto-converts VRM0→VRM1 orientation.
-    // Do NOT call VRMUtils.rotateVRM0 — guideRoot rotation.y handles facing.
+    step = 'ensure_renderer';
+    ensureRendererAlive();
+    if (!scene || !renderer) throw new Error('Three.js scene/renderer not ready after WebGL re-init');
 
+    step = 'add_to_scene';
     guideRoot = new THREE.Group();
     guideRoot.add(vrm.scene);
     scene.add(guideRoot);
 
+    step = 'normalize';
     normalizeVrmModel(vrm);
-    setGuideOpacity(guideOpacity);
+
+    step = 'opacity';
+    if (typeof window.setGuideOpacity === 'function') {
+      window.setGuideOpacity(guideOpacity);
+    }
 
     console.log('[YogaVRM] VRM normalized and added to scene');
 
     if (showBoneSkeleton) addBoneHelper();
 
-    // Enable retarget after short delay so display is stable first
     setTimeout(() => {
       enableRetarget = true;
       console.log('[YogaVRM] Retarget enabled');
@@ -242,18 +321,12 @@ async function loadVrmFromBase64Internal(base64) {
     postToFlutter({ type: 'ready' });
     setStatus('');
   } catch (err) {
-    console.error('[YogaVRM] loadVrm error', err);
-    var errorMsg = String(err);
-    if (errorMsg.includes('three') || errorMsg.includes('Three') || errorMsg.includes('THREE')) {
-      sendError('Failed to load Three.js dependency.', errorMsg);
-    } else if (errorMsg.includes('vrm') || errorMsg.includes('VRM') || errorMsg.includes('gltf') || errorMsg.includes('GLTF')) {
-      sendError('Không tải được VRM model.', errorMsg);
-    } else if (errorMsg.includes('NetworkError') || errorMsg.includes('net::ERR_') || errorMsg.includes('Failed to fetch')) {
-      sendError('Network error. Check internet connection.', errorMsg);
-    } else {
-      sendError('Không tải được VRM model.', errorMsg);
-    }
-    setStatus('Không tải được VRM model.');
+    console.error('[YogaVRM] loadVrm error at step=', step, err);
+    const errorMsg = (err && err.message) ? err.message : String(err);
+    const stack = (err && err.stack) ? String(err.stack) : '';
+    const detail = `[${step}] ${errorMsg}${stack ? '\n' + stack : ''}`;
+    sendError('Không tải được VRM model.', detail);
+    setStatus('Không tải được VRM model: ' + errorMsg);
   }
 }
 
@@ -270,23 +343,26 @@ window.loadVrmFromBase64 = async function (base64) {
 
 // ─── Guide transform (Flutter can call to adjust) ────────────────────────────
 window.setGuideTransform = function (config) {
-  if (config.scale !== undefined || config.yOffset !== undefined ||
-      config.zOffset !== undefined || config.yaw !== undefined) {
-    guideModelScale = config.scale ?? guideModelScale;
-    guideModelYOffset = config.yOffset ?? guideModelYOffset;
-    guideModelZOffset = config.zOffset ?? guideModelZOffset;
-    guideModelYaw = config.yaw ?? guideModelYaw;
-    if (guideRoot) {
-      guideRoot.position.set(0, guideModelYOffset, guideModelZOffset);
-      guideRoot.rotation.y = guideModelYaw;
-      guideRoot.scale.setScalar(1);
-    }
-  }
+  if (!config) return;
+  if (config.scale !== undefined) guideModelScale = config.scale;
+  if (config.yOffset !== undefined) guideModelYOffset = config.yOffset;
+  if (config.zOffset !== undefined) guideModelZOffset = config.zOffset;
+  if (config.yaw !== undefined) guideModelYaw = config.yaw;
+  if (config.pitch !== undefined) guideModelPitch = config.pitch;
+  applyGuideRootTransform();
 };
 
 window.setGuideYaw = function (yaw) {
-  guideModelYaw = yaw;
-  if (guideRoot) guideRoot.rotation.y = yaw;
+  guideModelYaw = Number(yaw);
+  if (Number.isNaN(guideModelYaw)) guideModelYaw = 0;
+  applyGuideRootTransform();
+};
+
+window.setGuidePitch = function (pitch) {
+  guideModelPitch = Number(pitch);
+  if (Number.isNaN(guideModelPitch)) guideModelPitch = 0;
+  applyGuideRootTransform();
+  console.log('[YogaVRM] setGuidePitch', guideModelPitch);
 };
 
 // ─── Landmark helpers ─────────────────────────────────────────────────────────
@@ -301,18 +377,17 @@ function getLandmark(frame, index) {
   return lm;
 }
 
-// MediaPipe world landmarks: Y-down → Three.js Y-up = negate Y.
-// MediaPipe Z is negative toward the camera, so invert Z for Three.js if camera is in +Z.
-// Always use wx/wy/wz for all 33 landmarks — do NOT mix with xNorm/yNorm.
+// MediaPipe world: Y-down → Three Y-up; depth +wz (as when pose mapping looked good).
+// No guideModelYaw here — yaw is display-only on guideRoot (slider).
 function toWorldPoint(lm) {
   if (!lm) return null;
   if (lm.wx != null) {
-    return new THREE.Vector3(lm.wx, -lm.wy, -lm.wz);
+    return new THREE.Vector3(lm.wx, -lm.wy, lm.wz);
   }
   if (lm.xNorm != null && lm.yNorm != null) {
     const x = (lm.xNorm - 0.5) * 1.5;
     const y = -(lm.yNorm - 0.5) * 1.5;
-    const z = (lm.z ?? 0) * 0.01;
+    const z = -((lm.z ?? 0) * 0.01);
     return new THREE.Vector3(x, y, z);
   }
   return null;
@@ -455,6 +530,33 @@ window.runBoneSanityTest = function () {
 // ─── Bone chain: world→local conversion (top-down, parent→child) ────────────
 const _parentWorldQuat = new THREE.Quaternion();
 const _desiredWorldQuat = new THREE.Quaternion();
+const _stripYawQuat = new THREE.Quaternion();
+const _yawAxisY = new THREE.Vector3(0, 1, 0);
+
+/**
+ * Why the yaw slider "snaps back" when Play/retarget runs:
+ *
+ * applyBoneDirectionChain does:
+ *   localQuat = inverse(parent.worldQuaternion) * desiredWorldQuat
+ *
+ * parent of the chain includes guideRoot.yaw. For upright spine,
+ * desiredWorldQuat ≈ identity (up→up), so
+ *   localQuat ≈ inverse(yaw)
+ * and the mesh world becomes yaw * inverse(yaw) ≈ identity — display spin is
+ * cancelled every frame by hips retarget. That is the "force pulling back".
+ *
+ * Fix: strip guideModelYaw from parent.world when solving local quats so
+ * retarget is independent of the display slider. guideRoot.yaw then sticks.
+ */
+function getParentWorldQuatForRetarget(bone, outQuat) {
+  bone.parent.getWorldQuaternion(outQuat);
+  // Strip full guideRoot rotation (yaw+pitch) so display tilt/spin never fights retarget.
+  if (guideRoot) {
+    guideRoot.getWorldQuaternion(_stripYawQuat);
+    outQuat.premultiply(_stripYawQuat.invert());
+  }
+  return outQuat;
+}
 
 function applyBoneDirectionChain(bone, fromWorld, toWorld, defaultDir, alpha) {
   if (!bone || !bone.parent) return;
@@ -465,7 +567,7 @@ function applyBoneDirectionChain(bone, fromWorld, toWorld, defaultDir, alpha) {
 
   _desiredWorldQuat.setFromUnitVectors(defaultDir.clone().normalize(), direction);
 
-  bone.parent.getWorldQuaternion(_parentWorldQuat);
+  getParentWorldQuatForRetarget(bone, _parentWorldQuat);
   const localQuat = _parentWorldQuat.clone().invert().multiply(_desiredWorldQuat);
 
   bone.quaternion.slerp(localQuat, alpha ?? rotationSmoothing);
@@ -479,8 +581,8 @@ function applyBoneDirectionChainByName(boneName, from, to, defaultDir, alpha) {
 }
 
 // ─── Torso (chain: hips → spine → chest → neck → head) ───────────────────────
+// Simple direction chain only — no hips twist/face "fix" (those twisted the whole body).
 function applyTorso(frame) {
-  // Shoulders/hips still use both sides (midpoints); head uses map head → nose.
   const ls = getLandmarkPoint(frame, LANDMARK.leftShoulder);
   const rs = getLandmarkPoint(frame, LANDMARK.rightShoulder);
   const hipL = getLandmarkPoint(frame, LANDMARK.leftHip);
@@ -572,6 +674,7 @@ function applyCustomPose(frame) {
   if (retargetParts.torso) applyTorso(frame);
   if (retargetParts.arms) { applyArm(frame, 'left'); applyArm(frame, 'right'); }
   if (retargetParts.legs) { applyLeg(frame, 'left'); applyLeg(frame, 'right'); }
+  applyGuideRootTransform();
 }
 
 // ─── Kalidokit ────────────────────────────────────────────────────────────────
