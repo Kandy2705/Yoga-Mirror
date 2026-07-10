@@ -43,3 +43,8 @@ app.*.map.json
 /android/app/debug
 /android/app/profile
 /android/app/release
+
+# Local docs — keep only README.md in git
+*.md
+!README.md
+!**/README.md
