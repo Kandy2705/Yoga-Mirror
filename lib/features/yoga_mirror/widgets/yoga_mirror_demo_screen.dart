@@ -283,6 +283,17 @@ class _YogaMirrorDemoScreenState extends State<YogaMirrorDemoScreen>
                       padding: EdgeInsets.only(top: 12),
                       child: _LoadChip(label: 'Đang tải mẫu động tác...'),
                     ),
+                  )
+                else if (_controller.isBufferingChunks)
+                  Align(
+                    alignment: Alignment.topCenter,
+                    child: Padding(
+                      padding: const EdgeInsets.only(top: 12),
+                      child: _LoadChip(
+                        label:
+                            'Đang nạp thêm pose ${_controller.loadedChunkCount}/${_controller.totalChunkCount}…',
+                      ),
+                    ),
                   ),
                 if (_scalePanelOpen) _buildScalePanel(),
               ],

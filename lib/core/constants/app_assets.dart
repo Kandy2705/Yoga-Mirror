@@ -1,7 +1,12 @@
 class AppAssets {
   AppAssets._();
 
+  /// Legacy monolith path (not bundled by default — use [treePoseMeta]).
   static const String treePoseJson = 'assets/poses/tree_pose.json';
+
+  /// Chunked pose manifest — load first chunk only at startup (fast).
+  /// Rebuild: `npm run split:pose` (source: tools/tree_pose.source.json)
+  static const String treePoseMeta = 'assets/poses/tree_pose/meta.json';
 
   /// Guide model — local Flutter asset only (no HTTPS / CDN).
   /// Prefer a single .vrm/.glb with meshes+textures embedded.
@@ -16,8 +21,8 @@ class AppAssets {
   /// Source (not loaded at runtime). Edit this, then rebuild bundle.
   static const String vrmRendererJsSource = 'assets/web/yoga_vrm_renderer.js';
 
-  /// Alias giữ tương thích code cũ.
-  static const String defaultPoseJson = treePoseJson;
+  /// Alias — default runtime path is chunked meta.
+  static const String defaultPoseJson = treePoseMeta;
 
   static const String exerciseDisplayName = 'Tree Pose';
 

@@ -6,7 +6,8 @@
     "build:renderer": "node tools/build_vrm_renderer.mjs",
     "postinstall": "node tools/build_vrm_renderer.mjs",
     "compress:vrm": "python3 tools/compress_vrm.py assets/yoga_avatar.vrm assets/yoga_avatar.vrm --max-size 512",
-    "compress:pose": "python3 tools/compress_pose_json.py assets/poses/tree_pose.json assets/poses/tree_pose.json"
+    "compress:pose": "python3 tools/compress_pose_json.py tools/tree_pose.source.json tools/tree_pose.source.json",
+    "split:pose": "python3 tools/split_pose_json.py tools/tree_pose.source.json assets/poses/tree_pose --frames-per-chunk 60"
   },
   "dependencies": {
     "@pixiv/three-vrm": "2.1.0",

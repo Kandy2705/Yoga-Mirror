@@ -62,7 +62,8 @@ flutter:
   uses-material-design: true
 
   assets:
-    - assets/poses/
+    # Chunked pose only (lazy). Monolith tree_pose.json is tooling source, not bundled.
+    - assets/poses/tree_pose/
     - assets/models/
     - assets/web/
 

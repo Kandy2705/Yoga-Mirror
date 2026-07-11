@@ -52,12 +52,17 @@ cd ios && pod install && cd ..
 
 ```text
 assets/
-├── poses/tree_pose.json                 # motion MediaPipe (local)
-├── models/yoga_avatar.vrm               # guide model (local, self-contained)
+├── poses/tree_pose/
+│   ├── meta.json                        # manifest (nhỏ)
+│   └── chunk_XXX.json                   # lazy pose chunks (~340KB mỗi file)
+├── models/yoga_avatar.vrm               # guide model (local)
 └── web/
-    ├── yoga_vrm_renderer.html           # shell, no CDN importmap
-    ├── yoga_vrm_renderer.js             # source (edit this)
-    └── yoga_vrm_renderer.bundle.js      # offline IIFE (three+vrm+kalidokit) — runtime
+    ├── yoga_vrm_renderer.html
+    ├── yoga_vrm_renderer.js             # source
+    └── yoga_vrm_renderer.bundle.js      # offline IIFE — runtime
+
+# Tooling (không bundle vào app):
+# tools/tree_pose.source.json  →  npm run split:pose
 ```
 
 Đường dẫn asset cấu hình tại `lib/core/constants/app_assets.dart`.
