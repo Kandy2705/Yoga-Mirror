@@ -17,9 +17,10 @@ Demo Flutter: **camera live** + **avatar 3D VRM** hướng dẫn tư thế yoga,
 
 - [Flutter](https://docs.flutter.dev/get-started/install) (SDK ^3.12)
 - Xcode (iOS) / Android Studio (Android)
-- **Internet lần đầu** — WebView load Three.js / three-vrm / Kalidokit từ CDN
+- **Không cần internet lúc chạy** — Three.js / three-vrm / Kalidokit đã bundle offline
+- (Dev) Node.js + npm nếu sửa `assets/web/yoga_vrm_renderer.js` → `npm run build:renderer`
 - Camera + quyền camera
-- Đủ chỗ trống: VRM ~10–20MB, pose JSON ~15MB+
+- Đủ chỗ trống: VRM ~6–7MB (đã nén texture), pose JSON ~8MB (minified), renderer bundle ~1.3MB
 
 Kiểm tra môi trường:
 
@@ -39,6 +40,10 @@ cd YogaMirror
 # Cài dependency
 flutter pub get
 
+# (Tuỳ chọn) rebuild WebView renderer offline bundle sau khi sửa JS
+npm install          # cài three/three-vrm/kalidokit + esbuild
+npm run build:renderer
+
 # iOS: cài CocoaPods
 cd ios && pod install && cd ..
 ```
@@ -47,14 +52,25 @@ cd ios && pod install && cd ..
 
 ```text
 assets/
-├── poses/tree_pose.json      # motion MediaPipe
-├── models/yoga_avatar.vrm    # avatar hướng dẫn (symlink → ../yoga_avatar.vrm)
+├── poses/tree_pose.json                 # motion MediaPipe (local)
+├── models/yoga_avatar.vrm               # guide model (local, self-contained)
 └── web/
-    ├── yoga_vrm_renderer.html
-    └── yoga_vrm_renderer.js
+    ├── yoga_vrm_renderer.html           # shell, no CDN importmap
+    ├── yoga_vrm_renderer.js             # source (edit this)
+    └── yoga_vrm_renderer.bundle.js      # offline IIFE (three+vrm+kalidokit) — runtime
 ```
 
 Đường dẫn asset cấu hình tại `lib/core/constants/app_assets.dart`.
+
+### Offline checklist (G1 pattern)
+
+| Mục | YogaMirror |
+|-----|------------|
+| Model trong project | `assets/models/yoga_avatar.vrm` (base64 → WebView, không HTTPS) |
+| Lib 3D npm bundle | `npm run build:renderer` → `yoga_vrm_renderer.bundle.js` |
+| Pose / animation | `assets/poses/*.json` local |
+| Texture / HDR ngoài | Không dùng |
+| Verify | Airplane mode → avatar + retarget vẫn load |
 
 ---
 
@@ -139,7 +155,7 @@ Hỗ trợ **portrait** và **landscape**.
 |----------|:------:|:--------------:|:------------:|
 | iOS device | ✅ | ✅ | ✅ ML Kit |
 | Android device | ✅ | ✅ | ✅ ML Kit |
-| iOS Simulator | ⚠️ / mock | ✅ (nếu CDN OK) | ❌ (`main_simulator`) |
+| iOS Simulator | ⚠️ / mock | ✅ offline bundle | ❌ (`main_simulator`) |
 | Flutter Web | ⚠️ | ❌ fallback | ❌ |
 
 ---
@@ -151,13 +167,18 @@ Hỗ trợ **portrait** và **landscape**.
 - Di chuyển máy xa hơn, đủ sáng, tránh che khuất khớp.
 
 ### VRM không hiện / lỗi load
-1. **Không có mạng** → CDN Three.js / three-vrm fail.
+1. Thiếu `assets/web/yoga_vrm_renderer.bundle.js` → chạy `npm run build:renderer`.
 2. Asset path sai hoặc thiếu trong `pubspec.yaml` (`assets/models/`, `assets/web/`).
 3. File `.vrm` hỏng / không đúng format.
 4. Lần đầu load chậm — chờ base64 chunk gửi xong rồi JS parse.
 
-### Internet
-- Lần đầu WebView cần CDN. Offline sau khi cache CDN có thể ổn, nhưng không đảm bảo trên mọi thiết bị.
+### Internet / offline
+- **Runtime không cần mạng**: model + pose + three/three-vrm/kalidokit đều local.
+- `INTERNET` permission Android vẫn có (debug tooling); app demo không fetch CDN/API.
+
+### Scale avatar theo người (mentor)
+- **2.1 Manual:** icon *open_with* trên header → slider scale / cao / ngang / Y offset.
+- **2.2 Session-start:** `applySessionBodyScale` hoặc `fitGuideToUserFromFrame` (lock sau lần đầu, cam live không re-scale).
 
 ### Simulator
 - Không test score / ML Kit trên Simulator.

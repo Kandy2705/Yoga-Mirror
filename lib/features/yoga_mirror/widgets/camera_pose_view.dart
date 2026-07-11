@@ -27,6 +27,7 @@ class _CameraPoseViewState extends State<CameraPoseView>
     with WidgetsBindingObserver {
   CameraController? _cameraController;
   bool _isDetecting = false;
+  bool _isInitializing = false;
   DateTime? _lastProcessedAt;
   String? _cameraError;
   bool _permissionDenied = false;
@@ -48,38 +49,82 @@ class _CameraPoseViewState extends State<CameraPoseView>
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
+    // iOS: kéo Control Center / volume / notification → AppLifecycleState.inactive
+    // rồi resumed. KHÔNG được dispose camera ở inactive (sẽ load lại liên tục).
+    // Chỉ nhả camera khi app thật sự vào background (paused / hidden).
+    switch (state) {
+      case AppLifecycleState.inactive:
+        // Giữ preview; chỉ tạm dừng pose stream để đỡ tốn CPU.
+        unawaited(_pauseImageStreamOnly());
+        break;
+      case AppLifecycleState.hidden:
+      case AppLifecycleState.paused:
+        unawaited(_stopCamera());
+        break;
+      case AppLifecycleState.resumed:
+        unawaited(_onResumed());
+        break;
+      case AppLifecycleState.detached:
+        break;
+    }
+  }
+
+  Future<void> _onResumed() async {
     final controller = _cameraController;
-    if (controller == null || !controller.value.isInitialized) {
+    if (controller != null && controller.value.isInitialized) {
+      // Camera còn sống (vd. sau Control Center) → chỉ bật lại stream.
+      if (widget.poseProcessor != null) {
+        await _startImageStream();
+      }
       return;
     }
+    await _initialize();
+  }
 
-    if (state == AppLifecycleState.inactive ||
-        state == AppLifecycleState.paused) {
-      _stopCamera();
-    } else if (state == AppLifecycleState.resumed) {
-      _initialize();
+  Future<void> _pauseImageStreamOnly() async {
+    final controller = _cameraController;
+    if (controller == null || !controller.value.isInitialized) return;
+    try {
+      if (controller.value.isStreamingImages) {
+        await controller.stopImageStream();
+      }
+    } catch (_) {
+      // Ignore: controller may already be torn down.
     }
   }
 
   Future<void> _initialize() async {
+    if (_isInitializing) return;
+    if (_cameraController != null && _cameraController!.value.isInitialized) {
+      return;
+    }
+    _isInitializing = true;
+
     if (kIsWeb) {
-      await _initializeWebCamera();
+      try {
+        await _initializeWebCamera();
+      } finally {
+        _isInitializing = false;
+      }
       return;
     }
 
     final status = await Permission.camera.request();
     if (!status.isGranted) {
-      setState(() {
-        _permissionDenied = true;
-        _cameraError = 'Không có quyền camera';
-      });
+      if (mounted) {
+        setState(() {
+          _permissionDenied = true;
+          _cameraError = 'Không có quyền camera';
+        });
+      }
+      _isInitializing = false;
       return;
     }
 
     try {
       final cameras = await availableCameras();
       if (cameras.isEmpty) {
-        setState(() => _cameraError = 'Không tìm thấy camera');
+        if (mounted) setState(() => _cameraError = 'Không tìm thấy camera');
         return;
       }
 
@@ -87,6 +132,9 @@ class _CameraPoseViewState extends State<CameraPoseView>
         (c) => c.lensDirection == CameraLensDirection.front,
         orElse: () => cameras.first,
       );
+
+      // Drop any half-dead controller before creating a new one.
+      await _stopCamera();
 
       final controller = CameraController(
         camera,
@@ -114,7 +162,9 @@ class _CameraPoseViewState extends State<CameraPoseView>
         await _startImageStream();
       }
     } catch (error) {
-      setState(() => _cameraError = 'Lỗi camera: $error');
+      if (mounted) setState(() => _cameraError = 'Lỗi camera: $error');
+    } finally {
+      _isInitializing = false;
     }
   }
 
@@ -162,16 +212,25 @@ class _CameraPoseViewState extends State<CameraPoseView>
 
   Future<void> _stopCamera() async {
     final controller = _cameraController;
+    _cameraController = null;
     if (controller == null) {
       return;
     }
 
-    if (controller.value.isStreamingImages) {
-      await controller.stopImageStream();
+    try {
+      if (controller.value.isInitialized && controller.value.isStreamingImages) {
+        await controller.stopImageStream();
+      }
+    } catch (_) {
+      // Stream may already be stopped.
     }
-    await controller.dispose();
+    try {
+      await controller.dispose();
+    } catch (_) {
+      // Ignore double-dispose.
+    }
     if (mounted) {
-      setState(() => _cameraController = null);
+      setState(() {});
     }
   }
 

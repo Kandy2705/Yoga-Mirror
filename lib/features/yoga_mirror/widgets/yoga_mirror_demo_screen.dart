@@ -25,10 +25,18 @@ class YogaMirrorDemoScreen extends StatefulWidget {
 class _YogaMirrorDemoScreenState extends State<YogaMirrorDemoScreen>
     with SingleTickerProviderStateMixin {
   late final YogaMirrorController _controller;
+  final GlobalKey<VrmModelWebViewState> _vrmKey =
+      GlobalKey<VrmModelWebViewState>();
   Ticker? _ticker;
   Duration? _lastTick;
   bool _debugOverlayEnabled = false;
   bool _mappingToolEnabled = false;
+  /// Manual guide scale panel (mentor option 2.1).
+  bool _scalePanelOpen = false;
+  double _manualScale = 0.7;
+  double _manualScaleY = 1.0;
+  double _manualScaleX = 1.0;
+  double _manualYOffset = 1.0;
   /// 0=off, 1=vrm (modal bones), 2=json, 3=all
   int _idLabelModeIndex = 0;
   static const _idLabelModes = ['off', 'vrm', 'json', 'all'];
@@ -189,6 +197,16 @@ class _YogaMirrorDemoScreenState extends State<YogaMirrorDemoScreen>
               _ => 'ID labels: off (tap → VRM)',
             },
           ),
+          IconButton(
+            onPressed: () => setState(() => _scalePanelOpen = !_scalePanelOpen),
+            icon: Icon(
+              Icons.open_with,
+              color: _scalePanelOpen
+                  ? const Color(0xFFB388FF)
+                  : Colors.white54,
+            ),
+            tooltip: 'Căn chỉnh scale avatar',
+          ),
           Expanded(
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
@@ -221,22 +239,6 @@ class _YogaMirrorDemoScreenState extends State<YogaMirrorDemoScreen>
     );
   }
   Widget _buildCameraStack() {
-    if (_controller.isLoading) {
-      return const Center(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            CircularProgressIndicator(color: Color(0xFFB388FF)),
-            SizedBox(height: 12),
-            Text(
-              'Đang tải mẫu động tác...',
-              style: TextStyle(color: Colors.white70),
-            ),
-          ],
-        ),
-      );
-    }
-
     if (_controller.loadError != null) {
       return Center(
         child: Padding(
@@ -250,6 +252,7 @@ class _YogaMirrorDemoScreenState extends State<YogaMirrorDemoScreen>
       );
     }
 
+    // Camera + VRM start immediately; pose JSON (~15MB) loads in background.
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 12),
       child: LayoutBuilder(
@@ -264,6 +267,7 @@ class _YogaMirrorDemoScreenState extends State<YogaMirrorDemoScreen>
                   poseProcessor: widget.poseProcessor,
                 ),
                 VrmModelWebView(
+                  key: _vrmKey,
                   modelAssetPath: AppAssets.yogaAvatarVrm,
                   currentFrame: _controller.currentSampleFrame,
                   opacity: 0.65,
@@ -272,10 +276,200 @@ class _YogaMirrorDemoScreenState extends State<YogaMirrorDemoScreen>
                   mappingToolEnabled: _mappingToolEnabled,
                   idLabelMode: _idLabelModes[_idLabelModeIndex],
                 ),
+                if (_controller.isLoading)
+                  const Align(
+                    alignment: Alignment.topCenter,
+                    child: Padding(
+                      padding: EdgeInsets.only(top: 12),
+                      child: _LoadChip(label: 'Đang tải mẫu động tác...'),
+                    ),
+                  ),
+                if (_scalePanelOpen) _buildScalePanel(),
               ],
             ),
           );
         },
+      ),
+    );
+  }
+
+  Widget _buildScalePanel() {
+    return Align(
+      alignment: Alignment.bottomCenter,
+      child: Material(
+        color: const Color(0xE61A1A24),
+        borderRadius: const BorderRadius.vertical(top: Radius.circular(16)),
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(16, 12, 16, 16),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Row(
+                children: [
+                  const Expanded(
+                    child: Text(
+                      'Căn chỉnh avatar',
+                      style: TextStyle(
+                        color: Colors.white,
+                        fontWeight: FontWeight.w600,
+                        fontSize: 14,
+                      ),
+                    ),
+                  ),
+                  TextButton(
+                    onPressed: () {
+                      _vrmKey.currentState?.resetSessionScale();
+                      setState(() {
+                        _manualScale = 0.7;
+                        _manualScaleX = 1.0;
+                        _manualScaleY = 1.0;
+                        _manualYOffset = 1.0;
+                      });
+                    },
+                    child: const Text('Reset'),
+                  ),
+                  IconButton(
+                    onPressed: () => setState(() => _scalePanelOpen = false),
+                    icon: const Icon(Icons.close, color: Colors.white70, size: 20),
+                  ),
+                ],
+              ),
+              _scaleSlider(
+                label: 'Scale chung',
+                value: _manualScale,
+                min: 0.3,
+                max: 1.5,
+                onChanged: (v) {
+                  setState(() => _manualScale = v);
+                  _pushManualScale();
+                },
+              ),
+              _scaleSlider(
+                label: 'Chiều cao (Y)',
+                value: _manualScaleY,
+                min: 0.5,
+                max: 1.8,
+                onChanged: (v) {
+                  setState(() => _manualScaleY = v);
+                  _pushManualScale();
+                },
+              ),
+              _scaleSlider(
+                label: 'Bề ngang (X)',
+                value: _manualScaleX,
+                min: 0.5,
+                max: 1.8,
+                onChanged: (v) {
+                  setState(() => _manualScaleX = v);
+                  _pushManualScale();
+                },
+              ),
+              _scaleSlider(
+                label: 'Lên / xuống',
+                value: _manualYOffset,
+                min: -0.5,
+                max: 2.0,
+                onChanged: (v) {
+                  setState(() => _manualYOffset = v);
+                  _pushManualScale();
+                },
+              ),
+              const SizedBox(height: 4),
+              Text(
+                'Tự scale theo body (1 lần khi bắt đầu) sẽ qua API '
+                'applySessionBodyScale / fitGuideToUserFromFrame — '
+                'không scale lại khi cam đang chạy.',
+                style: TextStyle(
+                  color: Colors.white.withValues(alpha: 0.45),
+                  fontSize: 11,
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _scaleSlider({
+    required String label,
+    required double value,
+    required double min,
+    required double max,
+    required ValueChanged<double> onChanged,
+  }) {
+    return Row(
+      children: [
+        SizedBox(
+          width: 96,
+          child: Text(
+            label,
+            style: const TextStyle(color: Colors.white70, fontSize: 12),
+          ),
+        ),
+        Expanded(
+          child: Slider(
+            value: value.clamp(min, max),
+            min: min,
+            max: max,
+            activeColor: const Color(0xFFB388FF),
+            onChanged: onChanged,
+          ),
+        ),
+        SizedBox(
+          width: 40,
+          child: Text(
+            value.toStringAsFixed(2),
+            style: const TextStyle(color: Colors.white54, fontSize: 11),
+            textAlign: TextAlign.end,
+          ),
+        ),
+      ],
+    );
+  }
+
+  void _pushManualScale() {
+    _vrmKey.currentState?.setGuideTransform(
+      scale: _manualScale,
+      scaleX: _manualScaleX,
+      scaleY: _manualScaleY,
+      yOffset: _manualYOffset,
+      force: true,
+    );
+  }
+}
+
+class _LoadChip extends StatelessWidget {
+  const _LoadChip({required this.label});
+
+  final String label;
+
+  @override
+  Widget build(BuildContext context) {
+    return Material(
+      color: const Color(0xCC1A1A24),
+      borderRadius: BorderRadius.circular(20),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const SizedBox(
+              width: 14,
+              height: 14,
+              child: CircularProgressIndicator(
+                strokeWidth: 2,
+                color: Color(0xFFB388FF),
+              ),
+            ),
+            const SizedBox(width: 8),
+            Text(
+              label,
+              style: const TextStyle(color: Colors.white70, fontSize: 12),
+            ),
+          ],
+        ),
       ),
     );
   }

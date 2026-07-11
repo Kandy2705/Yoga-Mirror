@@ -19,6 +19,9 @@ enum _LoadStep {
   error,
 }
 
+/// Top-level for [compute] — base64-encode VRM bytes off the UI isolate.
+String _encodeBase64(Uint8List bytes) => base64Encode(bytes);
+
 class VrmModelWebView extends StatefulWidget {
   const VrmModelWebView({
     super.key,
@@ -44,10 +47,11 @@ class VrmModelWebView extends StatefulWidget {
   final void Function(WebViewController controller)? onWebViewCreated;
 
   @override
-  State<VrmModelWebView> createState() => _VrmModelWebViewState();
+  State<VrmModelWebView> createState() => VrmModelWebViewState();
 }
 
-class _VrmModelWebViewState extends State<VrmModelWebView> {
+/// Public so parent can call scale/fit APIs via [GlobalKey].
+class VrmModelWebViewState extends State<VrmModelWebView> {
   WebViewController? _controller;
   bool _webViewReady = false;
   bool _vrmLoaded = false;
@@ -57,13 +61,32 @@ class _VrmModelWebViewState extends State<VrmModelWebView> {
   int _vrmBytes = 0;
   PoseFrame? _pendingFrame;
   bool _isLoadingVrm = false;
+  /// Preloaded while WebView boots — avoids serial read after page ready.
+  Future<String>? _vrmBase64Future;
 
   @override
   void initState() {
     super.initState();
     if (!kIsWeb) {
+      _vrmBase64Future = _preloadVrmBase64();
       _initWebView();
     }
+  }
+
+  Future<String> _preloadVrmBase64() async {
+    final data = await rootBundle.load(widget.modelAssetPath);
+    final bytes = data.buffer.asUint8List();
+    _vrmBytes = bytes.length;
+    if (_vrmBytes == 0) {
+      throw Exception('File VRM rỗng hoặc không đọc được.');
+    }
+    if (mounted) {
+      setState(() => _loadStep = _LoadStep.loadingAsset);
+    }
+    debugPrint('[VrmModelWebView] Preloaded VRM bytes: $_vrmBytes');
+    // base64Encode is CPU-heavy on ~10MB — run off UI isolate.
+    final b64 = await compute(_encodeBase64, bytes);
+    return b64;
   }
 
   @override
@@ -150,10 +173,11 @@ class _VrmModelWebViewState extends State<VrmModelWebView> {
 
   Future<String> _buildHtmlDocument() async {
     final html = await rootBundle.loadString(AppAssets.vrmRendererHtml);
+    // Offline IIFE bundle (no type=module, no CDN importmap).
     final js = await rootBundle.loadString(AppAssets.vrmRendererJs);
     return html.replaceFirst(
       '<!-- YOGA_VRM_SCRIPT -->',
-      '<script type="module">\n$js\n</script>',
+      '<script>\n$js\n</script>',
     );
   }
 
@@ -226,11 +250,9 @@ class _VrmModelWebViewState extends State<VrmModelWebView> {
     if (!_webViewReady) {
       _webViewReady = true;
     }
+    // No artificial delay — start transfer as soon as page/JS is up.
     if (!_isLoadingVrm && !_vrmLoaded && mounted) {
-      await Future.delayed(const Duration(milliseconds: 700));
-      if (mounted) {
-        await _loadVrmModel();
-      }
+      await _loadVrmModel();
     }
   }
 
@@ -239,45 +261,40 @@ class _VrmModelWebViewState extends State<VrmModelWebView> {
     if (controller == null || _isLoadingVrm || _vrmLoaded) return;
 
     _isLoadingVrm = true;
-    setState(() {
-      _loadStep = _LoadStep.loadingAsset;
-      _errorMessage = null;
-      _errorDetail = null;
-    });
+    if (mounted) {
+      setState(() {
+        _errorMessage = null;
+        _errorDetail = null;
+      });
+    }
 
     try {
-      debugPrint(
-        '[VrmModelWebView] Loading VRM asset: ${widget.modelAssetPath}',
-      );
-      final data = await rootBundle.load(widget.modelAssetPath);
-      final bytes = data.buffer.asUint8List();
-      _vrmBytes = bytes.length;
-      debugPrint('[VrmModelWebView] VRM bytes: $_vrmBytes');
-
-      if (_vrmBytes == 0) {
-        throw Exception('File VRM rỗng hoặc không đọc được.');
-      }
+      debugPrint('[VrmModelWebView] Waiting preloaded VRM base64...');
+      final base64 =
+          await (_vrmBase64Future ??= _preloadVrmBase64());
       if (!mounted) return;
 
       setState(() => _loadStep = _LoadStep.sendingToRenderer);
-      debugPrint('[VrmModelWebView] Sending VRM to renderer...');
-      final base64 = base64Encode(bytes);
+      debugPrint(
+        '[VrmModelWebView] Sending VRM to renderer ($_vrmBytes bytes)...',
+      );
 
-      for (var attempt = 0; attempt < 5; attempt++) {
+      for (var attempt = 0; attempt < 8; attempt++) {
         try {
           await controller.runJavaScript(
             "typeof window.beginVrmBase64Load === 'function' ? window.beginVrmBase64Load() : (()=>{ throw new Error('renderer_not_ready'); })()",
           );
           break;
         } catch (error) {
-          if (attempt == 4) rethrow;
+          if (attempt == 7) rethrow;
           debugPrint(
             '[VrmModelWebView] Renderer not ready yet, retrying... ($attempt)',
           );
-          await Future.delayed(const Duration(milliseconds: 400));
+          await Future.delayed(const Duration(milliseconds: 120));
         }
       }
 
+      // Larger chunks = fewer JS bridge round-trips (main transfer cost).
       const chunkSize = AppAssets.vrmBase64ChunkSize;
       for (var i = 0; i < base64.length; i += chunkSize) {
         final end = (i + chunkSize < base64.length)
@@ -405,6 +422,105 @@ class _VrmModelWebViewState extends State<VrmModelWebView> {
     }
   }
 
+  /// Manual scale/offset (mentor 2.1). Always `force: true` so user can tweak
+  /// even after a session-start auto scale.
+  Future<void> setGuideTransform({
+    double? scale,
+    double? scaleX,
+    double? scaleY,
+    double? yOffset,
+    double? zOffset,
+    double? yaw,
+    double? pitch,
+    bool force = true,
+  }) async {
+    if (_controller == null || !_vrmLoaded) return;
+    final config = <String, dynamic>{'force': force};
+    if (scale != null) config['scale'] = scale;
+    if (scaleX != null) config['scaleX'] = scaleX;
+    if (scaleY != null) config['scaleY'] = scaleY;
+    if (yOffset != null) config['yOffset'] = yOffset;
+    if (zOffset != null) config['zOffset'] = zOffset;
+    if (yaw != null) config['yaw'] = yaw;
+    if (pitch != null) config['pitch'] = pitch;
+    try {
+      await _controller!.runJavaScript(
+        'window.setGuideTransform(${jsonEncode(config)})',
+      );
+    } catch (error) {
+      debugPrint('[VrmModelWebView] setGuideTransform error: $error');
+    }
+  }
+
+  /// Mentor 2.2 — apply height/width once at session start, then lock.
+  Future<void> applySessionBodyScale({
+    double? scale,
+    double? heightScale,
+    double? widthScale,
+    double? yOffset,
+    double? zOffset,
+    bool lock = true,
+    bool force = false,
+  }) async {
+    if (_controller == null || !_vrmLoaded) return;
+    final params = <String, dynamic>{
+      'lock': lock,
+      'force': force,
+    };
+    if (scale != null) params['scale'] = scale;
+    if (heightScale != null) params['heightScale'] = heightScale;
+    if (widthScale != null) params['widthScale'] = widthScale;
+    if (yOffset != null) params['yOffset'] = yOffset;
+    if (zOffset != null) params['zOffset'] = zOffset;
+    try {
+      await _controller!.runJavaScript(
+        'window.applySessionBodyScale(${jsonEncode(params)})',
+      );
+    } catch (error) {
+      debugPrint('[VrmModelWebView] applySessionBodyScale error: $error');
+    }
+  }
+
+  /// Fit avatar to a user pose frame (landmarks) once; locks by default.
+  Future<void> fitGuideToUserFromFrame(
+    PoseFrame frame, {
+    bool lock = true,
+    bool force = false,
+  }) async {
+    if (_controller == null || !_vrmLoaded) return;
+    try {
+      final json = PoseFrameSerializer.toJsonString(frame);
+      await _controller!.runJavaScript(
+        'window.fitGuideToUserFromFrame($json, ${jsonEncode({
+              'lock': lock,
+              'force': force,
+            })})',
+      );
+    } catch (error) {
+      debugPrint('[VrmModelWebView] fitGuideToUserFromFrame error: $error');
+    }
+  }
+
+  Future<void> resetSessionScale() async {
+    if (_controller == null || !_vrmLoaded) return;
+    try {
+      await _controller!.runJavaScript('window.resetSessionScale()');
+    } catch (error) {
+      debugPrint('[VrmModelWebView] resetSessionScale error: $error');
+    }
+  }
+
+  Future<void> setSessionScaleLocked(bool locked) async {
+    if (_controller == null || !_vrmLoaded) return;
+    try {
+      await _controller!.runJavaScript(
+        'window.setSessionScaleLocked(${locked ? 'true' : 'false'})',
+      );
+    } catch (error) {
+      debugPrint('[VrmModelWebView] setSessionScaleLocked error: $error');
+    }
+  }
+
   String _loadStepText() {
     switch (_loadStep) {
       case _LoadStep.initializing:
@@ -462,30 +578,41 @@ class _VrmModelWebViewState extends State<VrmModelWebView> {
 
   Widget _loadingWidget() {
     final stepText = _loadStepText();
-    return Container(
-      alignment: Alignment.center,
-      color: Colors.black.withValues(alpha: 0.15),
-      padding: const EdgeInsets.all(16),
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          const SizedBox(
-            width: 28,
-            height: 28,
-            child: CircularProgressIndicator(
-              strokeWidth: 2.5,
-              color: Color(0xFFB388FF),
+    // Compact chip — camera stays visible underneath (feels faster).
+    return Align(
+      alignment: Alignment.bottomCenter,
+      child: Padding(
+        padding: const EdgeInsets.only(bottom: 16),
+        child: Material(
+          color: const Color(0xCC1A1A24),
+          borderRadius: BorderRadius.circular(20),
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                const SizedBox(
+                  width: 16,
+                  height: 16,
+                  child: CircularProgressIndicator(
+                    strokeWidth: 2,
+                    color: Color(0xFFB388FF),
+                  ),
+                ),
+                if (stepText.isNotEmpty) ...[
+                  const SizedBox(width: 10),
+                  Flexible(
+                    child: Text(
+                      stepText,
+                      textAlign: TextAlign.center,
+                      style: const TextStyle(color: Colors.white70, fontSize: 12),
+                    ),
+                  ),
+                ],
+              ],
             ),
           ),
-          if (stepText.isNotEmpty) ...[
-            const SizedBox(height: 12),
-            Text(
-              stepText,
-              textAlign: TextAlign.center,
-              style: const TextStyle(color: Colors.white70, fontSize: 13),
-            ),
-          ],
-        ],
+        ),
       ),
     );
   }

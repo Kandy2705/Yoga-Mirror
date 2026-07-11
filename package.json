@@ -1,0 +1,19 @@
+{
+  "name": "yoga-mirror-web-renderer",
+  "private": true,
+  "description": "Offline bundle for YogaMirror WebView VRM renderer (three + three-vrm + kalidokit)",
+  "scripts": {
+    "build:renderer": "node tools/build_vrm_renderer.mjs",
+    "postinstall": "node tools/build_vrm_renderer.mjs",
+    "compress:vrm": "python3 tools/compress_vrm.py assets/yoga_avatar.vrm assets/yoga_avatar.vrm --max-size 512",
+    "compress:pose": "python3 tools/compress_pose_json.py assets/poses/tree_pose.json assets/poses/tree_pose.json"
+  },
+  "dependencies": {
+    "@pixiv/three-vrm": "2.1.0",
+    "kalidokit": "1.1.5",
+    "three": "0.160.0"
+  },
+  "devDependencies": {
+    "esbuild": "^0.25.0"
+  }
+}

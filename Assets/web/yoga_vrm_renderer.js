@@ -1,13 +1,8 @@
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { VRMLoaderPlugin, VRMUtils } from '@pixiv/three-vrm';
-
-let Kalidokit = null;
-try {
-  Kalidokit = await import('kalidokit');
-} catch (e) {
-  console.warn('[YogaVRM] Kalidokit unavailable, using custom solver.', e);
-}
+// Static import so esbuild can offline-bundle (no CDN / dynamic network import).
+import * as Kalidokit from 'kalidokit';
 
 // ─── Config ─────────────────────────────────────────────────────────────────
 let enableRetarget = false;
@@ -16,8 +11,12 @@ let enableRetarget = false;
 let mirrorGuide = false;
 let retargetParts = { torso: true, arms: true, legs: true };
 const rotationSmoothing = 0.4;
-// ─── Guide display tuning (edit these numbers — no UI slider) ───────────────
+// ─── Guide display tuning ───────────────────────────────────────────────────
+// Uniform scale multiplier (on top of bbox normalize → ~1.8m).
 let guideModelScale = 0.7;
+// Non-uniform: height (Y) vs width/breadth (X). Depth (Z) follows average.
+let guideModelScaleY = 1.0;
+let guideModelScaleX = 1.0;
 let guideModelYOffset = 1;  // up/down (lower = model sits lower in frame)
 let guideModelZOffset = 0.0;   // toward/away camera
 // Face user (this VRM shows back at 0). Change only if facing wrong again.
@@ -25,6 +24,10 @@ let guideModelYaw = Math.PI;   // radians around Y (π = 180°)
 // If model leans too far FORWARD toward camera, try small NEGATIVE pitch
 // e.g. -0.08 … -0.15. If leans BACK, try small positive.
 let guideModelPitch = 0;    // radians around X (tilt)
+// Base scale from normalizeVrmModel (bbox → targetHeight). Re-applied with multipliers.
+let baseNormalizeScale = 1;
+// Session-start body fit: lock after first successful auto/backend scale (mentor 2.2).
+let sessionScaleLocked = false;
 
 // Camera: eye-level toward model (not high bird's-eye).
 // Raise camY ≈ lookY for flatter view; lower lookY = look down more.
@@ -32,13 +35,27 @@ const CAMERA_FOV = 35;
 const CAMERA_POS = { x: 0, y: 0.95, z: 2.7 };   // viewer height / distance
 const CAMERA_LOOK = { x: 0, y: 0.95, z: 0 };    // aim at mid/upper body (level)
 
+function applyModelScale() {
+  if (!vrm?.scene) return;
+  const u = baseNormalizeScale * guideModelScale;
+  const sx = u * guideModelScaleX;
+  const sy = u * guideModelScaleY;
+  // Depth: average of X/Y so silhouette does not look paper-thin or inflated.
+  const sz = u * ((guideModelScaleX + guideModelScaleY) * 0.5);
+  vrm.scene.scale.set(sx, sy, sz);
+  debugScaleFactor = sy;
+}
+
 function applyGuideRootTransform() {
   if (!guideRoot) return;
   guideRoot.position.set(0, guideModelYOffset, guideModelZOffset);
   // order YXZ: yaw then pitch feels natural for "stand and tip"
   guideRoot.rotation.order = 'YXZ';
   guideRoot.rotation.set(guideModelPitch, guideModelYaw, 0);
+  // Scale lives on vrm.scene (see applyModelScale) so setGuideTransform can
+  // change height/width without re-normalizing the mesh.
   guideRoot.scale.setScalar(1);
+  applyModelScale();
 }
 
 // ─── Scene state ───────────────────────────────────────────────────────────
@@ -203,11 +220,8 @@ function normalizeVrmModel(vrmModel) {
   vrmModel.scene.position.sub(center);
 
   const targetHeight = 1.8;
-  const scale = targetHeight / Math.max(size.y, 0.01);
-  vrmModel.scene.scale.setScalar(scale * guideModelScale);
-
+  baseNormalizeScale = targetHeight / Math.max(size.y, 0.01);
   debugRecenterOffset.copy(center);
-  debugScaleFactor = scale * guideModelScale;
 
   applyGuideRootTransform();
 
@@ -219,7 +233,8 @@ function normalizeVrmModel(vrmModel) {
   console.log('[YogaVRM] Model normalized:',
     'size', size.x.toFixed(3), size.y.toFixed(3), size.z.toFixed(3),
     'center', center.x.toFixed(3), center.y.toFixed(3), center.z.toFixed(3),
-    'scale', scale.toFixed(3));
+    'baseScale', baseNormalizeScale.toFixed(3),
+    'guideScale', guideModelScale.toFixed(3));
 }
 
 // ─── VRM load ─────────────────────────────────────────────────────────────────
@@ -342,14 +357,182 @@ window.loadVrmFromBase64 = async function (base64) {
 };
 
 // ─── Guide transform (Flutter can call to adjust) ────────────────────────────
+/**
+ * Manual / freeform scale & pose of the guide avatar.
+ * Mentor option 2.1 — user tự scale / căn chỉnh.
+ *
+ * config:
+ *  - scale: number       uniform multiplier (default 0.7)
+ *  - scaleX / scaleY:    relative width / height multipliers (default 1)
+ *  - yOffset / zOffset
+ *  - yaw / pitch (rad)
+ *  - force: bool         ignore sessionScaleLocked (manual UI always force)
+ */
 window.setGuideTransform = function (config) {
   if (!config) return;
-  if (config.scale !== undefined) guideModelScale = config.scale;
-  if (config.yOffset !== undefined) guideModelYOffset = config.yOffset;
-  if (config.zOffset !== undefined) guideModelZOffset = config.zOffset;
-  if (config.yaw !== undefined) guideModelYaw = config.yaw;
-  if (config.pitch !== undefined) guideModelPitch = config.pitch;
+  if (sessionScaleLocked && !config.force) {
+    console.log('[YogaVRM] setGuideTransform ignored (sessionScaleLocked)');
+    return false;
+  }
+  if (config.scale !== undefined) guideModelScale = Number(config.scale);
+  if (config.scaleX !== undefined) guideModelScaleX = Number(config.scaleX);
+  if (config.scaleY !== undefined) guideModelScaleY = Number(config.scaleY);
+  if (config.yOffset !== undefined) guideModelYOffset = Number(config.yOffset);
+  if (config.zOffset !== undefined) guideModelZOffset = Number(config.zOffset);
+  if (config.yaw !== undefined) guideModelYaw = Number(config.yaw);
+  if (config.pitch !== undefined) guideModelPitch = Number(config.pitch);
+  if (Number.isNaN(guideModelScale)) guideModelScale = 0.7;
+  if (Number.isNaN(guideModelScaleX)) guideModelScaleX = 1;
+  if (Number.isNaN(guideModelScaleY)) guideModelScaleY = 1;
   applyGuideRootTransform();
+  console.log('[YogaVRM] setGuideTransform', {
+    scale: guideModelScale, scaleX: guideModelScaleX, scaleY: guideModelScaleY,
+    yOffset: guideModelYOffset, zOffset: guideModelZOffset,
+  });
+  return true;
+};
+
+/**
+ * Mentor option 2.2 — backend (or app) trả height/width ratio một lần lúc bắt đầu.
+ * After apply + lock, live camera frames must NOT re-scale.
+ *
+ * params:
+ *  - heightScale: number  multiplies Y (e.g. userHeightM / 1.7)
+ *  - widthScale: number   multiplies X (e.g. userShoulderWidth / modelShoulder)
+ *  - scale: number        optional uniform base
+ *  - yOffset / zOffset
+ *  - lock: bool           default true — freeze for rest of session
+ */
+window.applySessionBodyScale = function (params) {
+  if (!params) return false;
+  if (sessionScaleLocked && !params.force) {
+    console.log('[YogaVRM] applySessionBodyScale skipped (already locked)');
+    return false;
+  }
+  if (params.scale !== undefined) guideModelScale = Number(params.scale);
+  if (params.heightScale !== undefined) guideModelScaleY = Number(params.heightScale);
+  if (params.widthScale !== undefined) guideModelScaleX = Number(params.widthScale);
+  // aliases
+  if (params.scaleY !== undefined) guideModelScaleY = Number(params.scaleY);
+  if (params.scaleX !== undefined) guideModelScaleX = Number(params.scaleX);
+  if (params.yOffset !== undefined) guideModelYOffset = Number(params.yOffset);
+  if (params.zOffset !== undefined) guideModelZOffset = Number(params.zOffset);
+  applyGuideRootTransform();
+  const shouldLock = params.lock !== false;
+  if (shouldLock) sessionScaleLocked = true;
+  console.log('[YogaVRM] applySessionBodyScale', {
+    scale: guideModelScale, scaleX: guideModelScaleX, scaleY: guideModelScaleY,
+    locked: sessionScaleLocked,
+  });
+  postToFlutter({
+    type: 'session_scale_applied',
+    scale: guideModelScale,
+    scaleX: guideModelScaleX,
+    scaleY: guideModelScaleY,
+    locked: sessionScaleLocked,
+  });
+  return true;
+};
+
+/**
+ * Fit guide height/width to a user PoseFrame (landmarks) once.
+ * Uses world coords if available, else screen-normalized bbox.
+ * Call only at session start (or pass lock:false for preview).
+ */
+window.fitGuideToUserFromFrame = function (frameJson, opts) {
+  opts = opts || {};
+  if (sessionScaleLocked && !opts.force) {
+    console.log('[YogaVRM] fitGuideToUserFromFrame skipped (locked)');
+    return false;
+  }
+  if (!vrm?.scene) return false;
+  const frame = typeof frameJson === 'string' ? JSON.parse(frameJson) : frameJson;
+  if (!frame?.landmarks?.length) return false;
+
+  const find = (index) => frame.landmarks.find((l) => l.index === index) || null;
+  const nose = find(LANDMARK.nose);
+  const lAnkle = find(LANDMARK.leftAnkle);
+  const rAnkle = find(LANDMARK.rightAnkle);
+  const lSh = find(LANDMARK.leftShoulder);
+  const rSh = find(LANDMARK.rightShoulder);
+  if (!nose || !lAnkle || !rAnkle || !lSh || !rSh) {
+    console.warn('[YogaVRM] fitGuideToUser: missing landmarks');
+    return false;
+  }
+
+  const pNose = toWorldPoint(nose);
+  const pLA = toWorldPoint(lAnkle);
+  const pRA = toWorldPoint(rAnkle);
+  const pLS = toWorldPoint(lSh);
+  const pRS = toWorldPoint(rSh);
+  if (!pNose || !pLA || !pRA || !pLS || !pRS) return false;
+
+  const ankleMid = midpoint(pLA, pRA);
+  const userHeight = Math.abs(pNose.y - ankleMid.y);
+  const userWidth = pLS.distanceTo(pRS);
+  if (userHeight < 1e-4 || userWidth < 1e-4) return false;
+
+  // Current VRM size after base normalize (before user multipliers)
+  vrm.scene.updateMatrixWorld(true);
+  // Temporarily reset multipliers to measure base body
+  const prevX = guideModelScaleX;
+  const prevY = guideModelScaleY;
+  const prevU = guideModelScale;
+  guideModelScaleX = 1;
+  guideModelScaleY = 1;
+  // keep guideModelScale so fit is relative to current uniform taste
+  applyModelScale();
+  vrm.scene.updateMatrixWorld(true);
+  const box = new THREE.Box3().setFromObject(vrm.scene);
+  const size = new THREE.Vector3();
+  box.getSize(size);
+  guideModelScaleX = prevX;
+  guideModelScaleY = prevY;
+  guideModelScale = prevU;
+
+  const modelH = Math.max(size.y, 1e-3);
+  const modelW = Math.max(size.x, 1e-3);
+  // Ratios: how much to stretch base model to match user proportions
+  let heightScale = userHeight / modelH;
+  let widthScale = userWidth / modelW;
+  // Clamp extreme outliers (bad depth / partial pose)
+  heightScale = Math.min(2.5, Math.max(0.35, heightScale));
+  widthScale = Math.min(2.5, Math.max(0.35, widthScale));
+
+  return window.applySessionBodyScale({
+    heightScale,
+    widthScale,
+    lock: opts.lock !== false,
+    force: !!opts.force,
+  });
+};
+
+window.setSessionScaleLocked = function (locked) {
+  sessionScaleLocked = !!locked;
+  console.log('[YogaVRM] sessionScaleLocked =', sessionScaleLocked);
+};
+
+window.resetSessionScale = function () {
+  sessionScaleLocked = false;
+  guideModelScale = 0.7;
+  guideModelScaleX = 1;
+  guideModelScaleY = 1;
+  applyGuideRootTransform();
+  console.log('[YogaVRM] session scale reset');
+};
+
+window.getGuideScaleState = function () {
+  return JSON.stringify({
+    scale: guideModelScale,
+    scaleX: guideModelScaleX,
+    scaleY: guideModelScaleY,
+    yOffset: guideModelYOffset,
+    zOffset: guideModelZOffset,
+    yaw: guideModelYaw,
+    pitch: guideModelPitch,
+    baseNormalizeScale,
+    sessionScaleLocked,
+  });
 };
 
 window.setGuideYaw = function (yaw) {
@@ -1330,12 +1513,17 @@ window.getDebugInfo = function () {
     mirrorGuide,
     guideModelYaw,
     guideModelScale,
+    guideModelScaleX,
+    guideModelScaleY,
     guideModelYOffset,
     guideModelZOffset,
+    baseNormalizeScale,
+    sessionScaleLocked,
     vrmLoaded: !!vrm,
     guideRootPresent: !!guideRoot,
     lastFrameTimestamp: lastFrame?.timestampMs ?? null,
     lastFrameLandmarks: lastFrame?.landmarks?.length ?? 0,
+    offlineBundle: true,
   };
   if (vrm?.humanoid) {
     const boneNames = [

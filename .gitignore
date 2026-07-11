@@ -44,6 +44,15 @@ app.*.map.json
 /android/app/profile
 /android/app/release
 
+# Offline WebView renderer toolchain (bundle is committed under assets/web/)
+/node_modules/
+/package-lock.json
+.npm-cache/
+*.vrm.bak
+*.json.bak
+assets/yoga_avatar.vrm.bak
+assets/poses/tree_pose.json.bak
+
 # Local docs — keep only README.md in git
 *.md
 !README.md

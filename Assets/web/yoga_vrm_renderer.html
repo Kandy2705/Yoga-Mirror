@@ -26,40 +26,27 @@
       display: none;
     }
   </style>
-  <script type="importmap">
-  {
-    "imports": {
-      "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
-      "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/",
-      "@pixiv/three-vrm": "https://cdn.jsdelivr.net/npm/@pixiv/three-vrm@2.1.0/lib/three-vrm.module.js",
-      "kalidokit": "https://esm.sh/kalidokit@1.1.5"
-    }
-  }
-  </script>
+  <!-- Offline: no importmap / CDN. Flutter injects yoga_vrm_renderer.bundle.js (esbuild IIFE). -->
   <script>
   window.addEventListener('error', function(e) {
     var msg = e.message || '';
-    if (msg.includes('three') || msg.includes('vrm') || msg.includes('kalidokit') || msg.includes('cdn') || msg.includes('jsdelivr') || msg.includes('esm.sh')) {
-      if (window.YogaMirrorBridge && window.YogaMirrorBridge.postMessage) {
-        window.YogaMirrorBridge.postMessage(JSON.stringify({
-          type: 'error',
-          message: 'Failed to load CDN dependency. Check internet.',
-          detail: msg
-        }));
-      }
+    if (window.YogaMirrorBridge && window.YogaMirrorBridge.postMessage) {
+      window.YogaMirrorBridge.postMessage(JSON.stringify({
+        type: 'error',
+        message: 'VRM renderer script error.',
+        detail: msg
+      }));
     }
   }, true);
 
   window.addEventListener('unhandledrejection', function(e) {
     var msg = e.reason ? (e.reason.message || String(e.reason)) : '';
-    if (msg.includes('three') || msg.includes('kalidokit') || msg.includes('vrm')) {
-      if (window.YogaMirrorBridge && window.YogaMirrorBridge.postMessage) {
-        window.YogaMirrorBridge.postMessage(JSON.stringify({
-          type: 'error',
-          message: 'Failed to load module dependency. Check internet.',
-          detail: msg
-        }));
-      }
+    if (window.YogaMirrorBridge && window.YogaMirrorBridge.postMessage) {
+      window.YogaMirrorBridge.postMessage(JSON.stringify({
+        type: 'error',
+        message: 'VRM renderer promise rejected.',
+        detail: msg
+      }));
     }
   });
   </script>
