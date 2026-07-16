@@ -30,9 +30,7 @@ InputImage? cameraImageToInputImage({
   }
 
   final plane = image.planes.first;
-  final bytes = Platform.isIOS
-      ? plane.bytes
-      : _concatenatePlanes(image.planes);
+  final bytes = Platform.isIOS ? plane.bytes : _concatenatePlanes(image.planes);
 
   return InputImage.fromBytes(
     bytes: bytes,
@@ -46,11 +44,17 @@ InputImage? cameraImageToInputImage({
 }
 
 Uint8List _concatenatePlanes(List<Plane> planes) {
-  final buffer = WriteBuffer();
+  var totalSize = 0;
   for (final plane in planes) {
-    buffer.putUint8List(plane.bytes);
+    totalSize += plane.bytes.length;
   }
-  return buffer.done().buffer.asUint8List();
+  final result = Uint8List(totalSize);
+  var offset = 0;
+  for (final plane in planes) {
+    result.setRange(offset, offset + plane.bytes.length, plane.bytes);
+    offset += plane.bytes.length;
+  }
+  return result;
 }
 
 InputImageRotation _rotationInt({

@@ -138,10 +138,11 @@ class _CameraPoseViewState extends State<CameraPoseView>
 
       final controller = CameraController(
         camera,
-        ResolutionPreset.medium,
+        ResolutionPreset.low,
         enableAudio: false,
-        imageFormatGroup:
-            Platform.isIOS ? ImageFormatGroup.bgra8888 : ImageFormatGroup.nv21,
+        imageFormatGroup: Platform.isIOS
+            ? ImageFormatGroup.bgra8888
+            : ImageFormatGroup.nv21,
       );
 
       await controller.initialize();
@@ -218,7 +219,8 @@ class _CameraPoseViewState extends State<CameraPoseView>
     }
 
     try {
-      if (controller.value.isInitialized && controller.value.isStreamingImages) {
+      if (controller.value.isInitialized &&
+          controller.value.isStreamingImages) {
         await controller.stopImageStream();
       }
     } catch (_) {
@@ -316,10 +318,7 @@ class _CameraPoseViewState extends State<CameraPoseView>
             textAlign: TextAlign.center,
             style: const TextStyle(color: Colors.white70),
           ),
-          if (action != null) ...[
-            const SizedBox(height: 12),
-            action,
-          ],
+          if (action != null) ...[const SizedBox(height: 12), action],
         ],
       ),
     );

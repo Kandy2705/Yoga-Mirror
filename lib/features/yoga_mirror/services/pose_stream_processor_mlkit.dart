@@ -13,7 +13,7 @@ class PoseStreamProcessorMlKit implements PoseStreamProcessor {
   Future<void> initialize() async {
     _detector ??= PoseDetector(
       options: PoseDetectorOptions(
-        model: PoseDetectionModel.accurate,
+        model: PoseDetectionModel.base,
         mode: PoseDetectionMode.stream,
       ),
     );
