@@ -1,0 +1,631 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>YogaMirror Kalidokit Solver</title>
+<!--
+  Offline: Flutter injects kalidokit.umd.js vào placeholder bên dưới.
+  (loadHtmlString không load được script src local / CDN offline.)
+-->
+<!-- KALIDOKIT_SCRIPT -->
+</head>
+<body>
+<script>
+// ══════════════════════════════════════════════════════════════════════════════
+// YogaMirror — Kalidokit Pose Solver (WebView, JS-only)
+// ══════════════════════════════════════════════════════════════════════════════
+//
+// KIẾN TRÚC:
+//   Flutter  ──processPose(jsonFrame)──►  JS (file này)
+//   Flutter  ◄──PoseChannel.postMessage──  poseRig RAW từ Kalidokit.Pose.solve()
+//
+// Dart KHÔNG tính vector/quaternion. File này CHỈ:
+//   1) Chuẩn hoá landmark JSON → format Kalidokit
+//   2) Gọi Kalidokit.Pose.solve()
+//   3) Trả poseRig thô (Euler radians) qua channel
+//
+// ──────────────────────────────────────────────────────────────────────────────
+// HỆ TRỤC MÀ KALIDOKIT MONG ĐỢI (lm3d = world landmarks)
+// ──────────────────────────────────────────────────────────────────────────────
+//
+//   Kalidokit được viết cho MediaPipe Pose world landmarks AS-IS.
+//   Sample chính thức (tutorial/kalidokit/sample/3d/script.js):
+//     pose3DLandmarks = results.ea / poseWorldLandmarks
+//     Kalidokit.Pose.solve(pose3DLandmarks, pose2DLandmarks, {runtime:'mediapipe'})
+//   → KHÔNG flip Y, KHÔNG flip Z trước khi solve.
+//
+//   Convention MediaPipe world (giữ NGUYÊN khi đưa vào Kalidokit):
+//     origin  : midpoint 2 hông (hips)
+//     +X      : về phía tay phải của người (anatomical right), nhìn từ camera ≈ trái màn hình
+//               (thực tế MP world X: person's right = positive khi person face camera?
+//                Data thật: leftShoulder xNorm > 0.5 ⇒ wx dương cho left side of image;
+//                Dùng nguyên wx từ JSON, không đoán thêm.)
+//     +Y      : HƯỚNG XUỐNG (Y-down). Đầu có wy < 0, chân có wy > 0.
+//               Bằng chứng data MediaPipe-video1: nose.wy≈-0.63, ankle.wy≈+0.75
+//     +Z      : xa camera hơn (depth). Gần camera hơn ⇒ z nhỏ hơn / âm.
+//               Bằng chứng: nose.wz≈-0.31, ankle.wz≈+0.19
+//
+// ⚠ TẠI SAO KHÔNG ĐẢO Y-down → Y-up TRƯỚC solve?
+//   User yêu cầu "Y-up cho model 3D" — đúng cho retarget VECTOR thủ công lên Three.js.
+//   Với Kalidokit: các công thức (calcArms/calcLegs/calcHips + clamp offscreen
+//   kiểu `lm3d[15].y > 0.1`) đã được tune trên Y-down MediaPipe.
+//   Nếu flip Y trước solve → mọi góc Euler ra sai → "xoắn xương".
+//   Euler poseRig ra khỏi Kalidokit đã sẵn sàng gán bone.rotation VRM
+//   (xem sample: rigRotation("RightUpperArm", riggedPose.RightUpperArm) trực tiếp).
+//
+// ⚠ TẠI SAO sapiens2_to_mediapipe_video_3 DỄ BỊ VẶN?
+//   1) wx/wy/wz = null, z = null → KHÔNG có depth 3D thật.
+//      Pseudo-world z≈0 phẳng → cẳng tay/cẳng chân "thụt" sai, trông như xoắn.
+//   2) File solver cũ flip Y + flip Z rồi mới solve → gãy convention Kalidokit.
+//   3) Mapping L/R bone ở tầng VRM (Flutter/renderer) — không làm ở đây.
+//
+// ──────────────────────────────────────────────────────────────────────────────
+// OUTPUT poseRig (RAW, không swap L/R, không slerp, không đổi Euler→Quat)
+// ──────────────────────────────────────────────────────────────────────────────
+//   RightUpperArm / LeftUpperArm / RightLowerArm / LeftLowerArm : {x,y,z} rad
+//   RightHand / LeftHand                                         : {x,y,z} rad
+//   RightUpperLeg / LeftUpperLeg / RightLowerLeg / LeftLowerLeg  : {x,y,z} rad
+//   Hips  : { position, rotation (rad sau rigHips), worldPosition }
+//   Spine : {x,y,z} rad
+//
+//   Naming Kalidokit (giữ nguyên, bạn tự map bên Flutter):
+//     calcArms: UpperArm.r = findRotation(lm[11], lm[13])  // MP left arm indices
+//               → export key "RightUpperArm"
+//     Official sample gán key đó thẳng vào VRM bone cùng tên.
+//     Đây là convention Kalidokit, KHÔNG phải bug mapping của file này.
+//
+// ══════════════════════════════════════════════════════════════════════════════
+
+/** Scale màn hình → mét ước lượng khi thiếu world landmarks (chỉ path fallback 2D). */
+var SCREEN_TO_METERS = 1.5;
+
+/**
+ * true nếu landmark có đủ world coords MediaPipe (wx, wy, wz số hữu hạn).
+ */
+function hasWorldCoords(lm) {
+  return (
+    lm &&
+    typeof lm.wx === 'number' && isFinite(lm.wx) &&
+    typeof lm.wy === 'number' && isFinite(lm.wy) &&
+    typeof lm.wz === 'number' && isFinite(lm.wz)
+  );
+}
+
+/**
+ * Đếm số landmark có world coords trong frame.
+ */
+function countWorldLandmarks(landmarks) {
+  var n = 0;
+  for (var i = 0; i < landmarks.length; i++) {
+    if (hasWorldCoords(landmarks[i])) n++;
+  }
+  return n;
+}
+
+/**
+ * Build lm2d — screen-space normalized [0..1] cho Kalidokit.
+ *
+ *  KHÔNG đảo trục nào.
+ *  x: 0=trái màn hình → 1=phải
+ *  y: 0=trên màn hình → 1=dưới  (Y-down screen)
+ *  z: depth screen-space MediaPipe (âm = gần camera); sapiens2 thường null → 0
+ */
+function buildLm2d(landmarks) {
+  var arr = new Array(33);
+  for (var i = 0; i < 33; i++) {
+    arr[i] = { x: 0.5, y: 0.5, z: 0, visibility: 0 };
+  }
+  landmarks.forEach(function (lm) {
+    if (lm.index == null || lm.index < 0 || lm.index > 32) return;
+    arr[lm.index] = {
+      x: lm.xNorm != null ? lm.xNorm : 0.5,
+      y: lm.yNorm != null ? lm.yNorm : 0.5,
+      // Giữ nguyên z screen; null → 0. KHÔNG đảo dấu.
+      z: lm.z != null && isFinite(lm.z) ? lm.z : 0,
+      visibility: lm.visibility != null ? lm.visibility : 0,
+    };
+  });
+  return arr;
+}
+
+/**
+ * Build lm3d — world-space 3D cho Kalidokit.Pose.solve (arg 1).
+ *
+ * Path A (ưu tiên): có wx/wy/wz
+ *   → truyền NGUYÊN MediaPipe world, KHÔNG flip Y, KHÔNG flip Z.
+ *
+ * Path B (fallback sapiens2 / thiếu world):
+ *   → pseudo-world từ xNorm/yNorm, GIỮ Y-down (cùng convention MediaPipe),
+ *     recenter hip midpoint, z=0 (không bịa depth).
+ *
+ * @returns {{ lm3d: Array, mode: string, notes: string[] }}
+ */
+function buildLm3d(landmarks) {
+  var notes = [];
+  var byIndex = new Array(33);
+  for (var i = 0; i < 33; i++) {
+    byIndex[i] = { x: 0, y: 0, z: 0, visibility: 0 };
+  }
+
+  var worldCount = countWorldLandmarks(landmarks);
+  // Ngưỡng: ≥ 10 điểm world (vai+hông+khuỷu tối thiểu) → Path A
+  var useWorld = worldCount >= 10;
+
+  if (useWorld) {
+    notes.push('mode=mediapipe_world: pass wx/wy/wz raw (Y-down, no axis flip)');
+    landmarks.forEach(function (lm) {
+      if (lm.index == null || lm.index < 0 || lm.index > 32) return;
+      if (hasWorldCoords(lm)) {
+        // ── PATH A: MediaPipe world AS-IS ──────────────────────────────────
+        // KHÔNG có dòng đảo trục ở đây. Kalidokit sample cũng không flip.
+        byIndex[lm.index] = {
+          x: lm.wx, // giữ nguyên
+          y: lm.wy, // giữ nguyên (Y-down MediaPipe)
+          z: lm.wz, // giữ nguyên (âm = gần camera)
+          visibility: lm.visibility != null ? lm.visibility : 1,
+        };
+      } else {
+        // Thiếu world cho điểm lẻ: fallback screen → pseudo, cùng convention Y-down
+        var xn = lm.xNorm != null ? lm.xNorm : 0.5;
+        var yn = lm.yNorm != null ? lm.yNorm : 0.5;
+        byIndex[lm.index] = {
+          // SCALE: center + mét ước lượng — không đảo X
+          x: (xn - 0.5) * SCREEN_TO_METERS,
+          // KHÔNG đảo Y: yNorm lớn (xuống dưới màn) → y dương (Y-down)
+          y: (yn - 0.5) * SCREEN_TO_METERS,
+          // Không bịa depth khi z null
+          z: lm.z != null && isFinite(lm.z) ? lm.z * 0.01 : 0, // SCALE depth screen→mét (nếu có)
+          visibility: lm.visibility != null ? lm.visibility : 0,
+        };
+        notes.push('lm[' + lm.index + '] missing world → screen fallback');
+      }
+    });
+    // MediaPipe world đã origin ≈ hip center — KHÔNG recenter lại (tránh double-shift).
+    return { lm3d: byIndex, mode: 'mediapipe_world', notes: notes };
+  }
+
+  // ── PATH B: chỉ có screen (sapiens2_to_mediapipe_video_3) ────────────────
+  notes.push(
+    'mode=screen_pseudo_world: wx/wy/wz missing — build Y-down plane from xNorm/yNorm, z=0'
+  );
+  notes.push(
+    'WARNING: flat z=0 → Kalidokit thiếu depth → tay/chân tiến-lùi có thể vặn; ưu tiên JSON có world coords'
+  );
+
+  landmarks.forEach(function (lm) {
+    if (lm.index == null || lm.index < 0 || lm.index > 32) return;
+    var xn = lm.xNorm != null ? lm.xNorm : 0.5;
+    var yn = lm.yNorm != null ? lm.yNorm : 0.5;
+
+    byIndex[lm.index] = {
+      // SCALE X: screen center → 0, *1.5m. KHÔNG đảo X.
+      x: (xn - 0.5) * SCREEN_TO_METERS,
+
+      // Y: GIỮ Y-down giống MediaPipe world.
+      //    yNorm=0 (đỉnh màn) → y âm; yNorm=1 (đáy) → y dương.
+      //    ⚠ KHÔNG viết -(yn-0.5) — đó là Y-up Three.js, PHÁ Kalidokit.
+      y: (yn - 0.5) * SCREEN_TO_METERS,
+
+      // Z: sapiens2 z=null → 0. Không đảo, không scale bịa.
+      //    Nếu sau này JSON có z screen, scale nhẹ, GIỮ dấu MediaPipe (âm=gần camera):
+      z: lm.z != null && isFinite(lm.z) ? lm.z * 0.01 /* SCALE only, no flip */ : 0,
+
+      visibility: lm.visibility != null ? lm.visibility : 0,
+    };
+  });
+
+  // Recenter về midpoint hông — giống origin MediaPipe world.
+  // Chỉ tịnh tiến (translate), KHÔNG scale / KHÔNG flip trục.
+  var hL = byIndex[23];
+  var hR = byIndex[24];
+  if (hL.visibility > 0 && hR.visibility > 0) {
+    var cx = (hL.x + hR.x) * 0.5;
+    var cy = (hL.y + hR.y) * 0.5;
+    var cz = (hL.z + hR.z) * 0.5;
+    for (var j = 0; j < 33; j++) {
+      if (byIndex[j].visibility > 0) {
+        byIndex[j].x -= cx; // TRANSLATE only
+        byIndex[j].y -= cy;
+        byIndex[j].z -= cz;
+      }
+    }
+    notes.push('recenter: subtract hip midpoint (translate only)');
+  } else {
+    notes.push('recenter skipped: hips not visible');
+  }
+
+  // Depth heuristic (PATH B only): z=0 phẳng → Kalidokit luôn đẩy tay ra SAU.
+  // MediaPipe thật: cổ tay phía trước cơ thể có wz < hip (âm hơn = gần camera).
+  applyArmFrontDepthHeuristic(byIndex, notes);
+
+  return { lm3d: byIndex, mode: 'screen_pseudo_world', notes: notes };
+}
+
+/**
+ * Ước lượng depth khi thiếu wz — chống tay "cắm ra sau lưng".
+ *
+ * MediaPipe world: z âm hơn = gần camera hơn = phía trước khi người nhìn camera.
+ * Với tay buông / để lên đùi (wrist thấp hơn shoulder theo Y-down):
+ *   elbow z ≈ -0.08 .. -0.12
+ *   wrist z ≈ -0.15 .. -0.25
+ * (đã kiểm tra MediaPipe-video1: wrist.wz ≈ -0.16..-0.20, hip ≈ 0)
+ *
+ * Side-view (vai hẹp theo X): "phía trước" vẫn là -Z camera-facing heuristic
+ * vì video Instruct quay body profile nhưng tay để trước đùi vẫn trước thân.
+ */
+function applyArmFrontDepthHeuristic(lm3d, notes) {
+  // MP indices: L shoulder 11, elbow 13, wrist 15; R 12, 14, 16
+  // hand tips 17-22 optional
+  var pairs = [
+    { sh: 11, el: 13, wr: 15, side: 'L' },
+    { sh: 12, el: 14, wr: 16, side: 'R' },
+  ];
+  var applied = 0;
+
+  for (var i = 0; i < pairs.length; i++) {
+    var p = pairs[i];
+    var sh = lm3d[p.sh];
+    var el = lm3d[p.el];
+    var wr = lm3d[p.wr];
+    if (!sh || !el || !wr) continue;
+    if (sh.visibility < 0.2 || wr.visibility < 0.2) continue;
+
+    // Y-down: wrist lower than shoulder → arm down / hands on legs
+    var armDown = wr.y > sh.y + 0.04;
+    // Wrist roughly beside hip (hands on thighs) — not raised high
+    var hip = lm3d[p.side === 'L' ? 23 : 24];
+    var nearHip = false;
+    if (hip && hip.visibility > 0.2) {
+      var dx = wr.x - hip.x;
+      var dy = wr.y - hip.y;
+      nearHip = Math.sqrt(dx * dx + dy * dy) < 0.35;
+    }
+
+    if (!armDown && !nearHip) continue;
+
+    // How far down (0..1): more down → more forward depth
+    var downAmt = clampNum((wr.y - sh.y) / 0.45, 0, 1);
+    if (nearHip) downAmt = Math.max(downAmt, 0.75);
+
+    // SCALE depth (meters-ish): forward = negative Z
+    var zWrist = -0.12 - 0.14 * downAmt; // ~-0.12 .. -0.26
+    var zElbow = -0.05 - 0.08 * downAmt; // ~-0.05 .. -0.13
+    var zSh = -0.02;
+
+    // Only write when flat/missing (don't override real world z much)
+    if (Math.abs(wr.z) < 0.02) wr.z = zWrist;
+    if (Math.abs(el.z) < 0.02) el.z = zElbow;
+    if (Math.abs(sh.z) < 0.02) sh.z = zSh;
+
+    // Fingers / pinky / index near wrist
+    var tips = p.side === 'L' ? [17, 19, 21] : [18, 20, 22];
+    for (var t = 0; t < tips.length; t++) {
+      var tip = lm3d[tips[t]];
+      if (tip && tip.visibility > 0.15 && Math.abs(tip.z) < 0.02) {
+        tip.z = zWrist - 0.02;
+      }
+    }
+    applied++;
+  }
+
+  if (applied > 0) {
+    notes.push(
+      'DEPTH heuristic: arm-down/hands-on-legs → wrist/elbow z forward (neg Z) x' +
+        applied
+    );
+  }
+}
+
+/**
+ * Vector / plain object → {x,y,z} JSON-safe.
+ */
+function xyzOf(v) {
+  if (!v) return null;
+  return {
+    x: typeof v.x === 'number' ? v.x : 0,
+    y: typeof v.y === 'number' ? v.y : 0,
+    z: typeof v.z === 'number' ? v.z : 0,
+  };
+}
+
+function clampNum(v, lo, hi) {
+  return Math.max(lo, Math.min(hi, v));
+}
+
+function normAngle(a) {
+  var x = a;
+  while (x > Math.PI) x -= Math.PI * 2;
+  while (x < -Math.PI) x += Math.PI * 2;
+  return x;
+}
+
+/**
+ * Phân tích góc nhìn frame (front vs side) từ lm2d screen.
+ *
+ * Side-view: vai/hông gần như chồng lên theo X (lateralRatio nhỏ).
+ * Video yoga "gốc nhìn ngang" như Instruct → Kalidokit calcHips rất dễ
+ * cho hips.y và spine.y lệch ~π → hông một bên, thân một bên.
+ */
+function analyzeView(lm2d) {
+  var shW = Math.abs(lm2d[11].x - lm2d[12].x);
+  var hipW = Math.abs(lm2d[23].x - lm2d[24].x);
+  var midShY = (lm2d[11].y + lm2d[12].y) * 0.5;
+  var midHipY = (lm2d[23].y + lm2d[24].y) * 0.5;
+  var torsoH = Math.abs(midShY - midHipY);
+  var lateralRatio = ((shW + hipW) * 0.5) / Math.max(torsoH, 1e-4);
+
+  // Ngưỡng thực nghiệm: front ~0.28+, pure side ~0.05–0.15
+  var isSideView = lateralRatio < 0.22;
+
+  var midShX = (lm2d[11].x + lm2d[12].x) * 0.5;
+  var midHipX = (lm2d[23].x + lm2d[24].x) * 0.5;
+  var midTx = (midShX + midHipX) * 0.5;
+  var noseX = lm2d[0] ? lm2d[0].x : midTx;
+  // faceDir: -1 mặt về trái màn hình, +1 về phải (profile)
+  var faceDir = noseX < midTx ? -1 : 1;
+
+  // Nghiêng người theo hướng nhìn (side): vai lệch so với hông theo X
+  var leanAlongView = (midShX - midHipX) * faceDir;
+
+  // 2 tay để lên đùi/chân: cổ tay gần hông (screen space 0..1)
+  var handsOnLegs = false;
+  function wrNearHip(wr, hip) {
+    if (!wr || !hip || wr.visibility < 0.2 || hip.visibility < 0.2) return false;
+    var dx = wr.x - hip.x;
+    var dy = wr.y - hip.y;
+    return Math.sqrt(dx * dx + dy * dy) < 0.14;
+  }
+  if (
+    wrNearHip(lm2d[15], lm2d[23]) &&
+    wrNearHip(lm2d[16], lm2d[24])
+  ) {
+    handsOnLegs = true;
+  }
+
+  return {
+    lateralRatio: lateralRatio,
+    isSideView: isSideView,
+    faceDir: faceDir,
+    leanAlongView: leanAlongView,
+    _handsOnLegs: handsOnLegs,
+  };
+}
+
+/**
+ * Ổn định torso sau Kalidokit.Pose.solve.
+ *
+ * Nguyên nhân "hông 1 bên / người 1 bên":
+ *  1) calcHips side-view: hips.y ≈ 0, spine.y ≈ π (lệch 180°)
+ *  2) Sample apply dampener chồng yaw (hips 0.7 + spine 0.45 + chest 0.25)
+ *     → relative twist ngay cả khi cùng dấu
+ *
+ * Quy tắc sửa (trong solver, trước khi gửi Flutter):
+ *  - Body yaw CHỈ nằm ở Hips.rotation.y
+ *  - Spine.y luôn 0 (relative) — spine chỉ giữ x/z (nghiêng/cúi)
+ *  - Side-view: nếu Kalidokit báo front/back (0 hoặc ±π) → ép hips.y = ±π/2 theo faceDir
+ */
+function stabilizePoseRig(poseRig, lm2d, notes) {
+  if (!poseRig || !poseRig.Hips || !poseRig.Hips.rotation) return poseRig;
+
+  var view = analyzeView(lm2d);
+  notes.push(
+    'view lateralRatio=' +
+      view.lateralRatio.toFixed(3) +
+      (view.isSideView ? ' SIDE' : ' FRONT') +
+      ' faceDir=' +
+      view.faceDir
+  );
+
+  var hips = poseRig.Hips.rotation;
+  if (!poseRig.Spine) poseRig.Spine = { x: 0, y: 0, z: 0 };
+  var spine = poseRig.Spine;
+
+  var dy = Math.abs(normAngle(hips.y - spine.y));
+  var hipsYawAbs = Math.abs(normAngle(hips.y));
+  var isFrontBackYaw =
+    hipsYawAbs < 0.35 || Math.abs(hipsYawAbs - Math.PI) < 0.35;
+
+  if (view.isSideView) {
+    // Side-view: body phải quay ngang (yaw ±π/2), không front/back.
+    //
+    // DẤU CHIỀU (đã calibrate vs video Instruct + guideModelYaw=π):
+    //   Video quay TRÁI màn nhưng VRM quay phải / ngã SAU thay vì cúi TRƯỚC
+    //   → đảo cả yaw (hips.y) và pitch lean (spine.x) so với faceDir thô.
+    //   faceDir: -1 khi mũi bên trái mid-torso (profile nhìn trái màn hình).
+    if (dy > Math.PI * 0.4 || isFrontBackYaw) {
+      // ĐẢO YAW: -faceDir * π/2  (trước: faceDir * π/2 bị ngược L/R trên màn)
+      hips.y = -view.faceDir * (Math.PI * 0.5);
+      notes.push(
+        'SIDE fix: hips.y → ' +
+          hips.y.toFixed(3) +
+          ' (-faceDir*π/2; dy=' +
+          dy.toFixed(3) +
+          ')'
+      );
+    }
+    // Roll hông side-view của Kalidokit hay nhiễu (hips.z ~ -1) → giảm mạnh
+    hips.z = hips.z * 0.15;
+    hips.x = 0; // Kalidokit vốn set x=0; giữ
+
+    // Cúi người → spine.x. ĐẢO PITCH: -lean (trước: +lean → ngã ra sau)
+    var lean = clampNum(view.leanAlongView * 3.5, -0.55, 0.55);
+    spine.x = -lean;
+    spine.y = 0; // ⚠ yaw body chỉ ở hips
+    spine.z = spine.z * 0.2;
+    notes.push('SIDE: spine.y=0 lean→spine.x=' + spine.x.toFixed(3) + ' (-lean)');
+  } else {
+    // Front: nếu hips/spine yaw xung đột → tin hips, xoá spine.y
+    if (dy > Math.PI * 0.4) {
+      notes.push(
+        'FRONT unify: clear spine.y (was ' +
+          spine.y.toFixed(3) +
+          ', hips.y=' +
+          hips.y.toFixed(3) +
+          ')'
+      );
+      spine.y = 0;
+    } else {
+      // Dù cùng hướng: vẫn dồn yaw về hips để apply không chồng dampener
+      // (giữ một phần tilt z của spine)
+      spine.y = 0;
+    }
+  }
+
+  // Clamp lower leg: Kalidokit đôi khi trả ±π (gập gối ảo)
+  ['RightLowerLeg', 'LeftLowerLeg'].forEach(function (k) {
+    if (!poseRig[k]) return;
+    poseRig[k].x = clampNum(poseRig[k].x, -2.4, 0.15);
+    poseRig[k].y = clampNum(poseRig[k].y, -0.4, 0.4);
+    poseRig[k].z = clampNum(poseRig[k].z, -0.4, 0.4);
+  });
+
+  // Hands-on-legs backup: nếu vẫn thiếu depth, đẩy upperArm.x về phía trước
+  // (khớp delta khi so flat z=0 vs front-bias depth trên data thật).
+  // Kalidokit RightUpperArm ← MP left arm; LeftUpperArm ← MP right arm.
+  if (view._handsOnLegs) {
+    if (poseRig.RightUpperArm) {
+      poseRig.RightUpperArm.x = clampNum(poseRig.RightUpperArm.x - 0.35, -1.2, 1.0);
+    }
+    if (poseRig.LeftUpperArm) {
+      poseRig.LeftUpperArm.x = clampNum(poseRig.LeftUpperArm.x + 0.35, -1.0, 1.2);
+    }
+    notes.push('hands-on-legs: bias UpperArm.x forward');
+  }
+
+  // Gắn meta view cho Flutter/debug
+  poseRig._view = {
+    lateralRatio: view.lateralRatio,
+    isSideView: view.isSideView,
+    faceDir: view.faceDir,
+    handsOnLegs: !!view._handsOnLegs,
+  };
+
+  return poseRig;
+}
+
+/**
+ * poseRig Kalidokit → plain JSON.
+ */
+function serializePoseRig(poseRig) {
+  if (!poseRig) return null;
+  var out = {};
+  var keys = [
+    'RightUpperArm', 'RightLowerArm', 'LeftUpperArm', 'LeftLowerArm',
+    'RightHand', 'LeftHand',
+    'RightUpperLeg', 'RightLowerLeg', 'LeftUpperLeg', 'LeftLowerLeg',
+    'Spine',
+  ];
+  for (var i = 0; i < keys.length; i++) {
+    var k = keys[i];
+    if (poseRig[k] != null) out[k] = xyzOf(poseRig[k]);
+  }
+  if (poseRig.Hips) {
+    out.Hips = {
+      position: xyzOf(poseRig.Hips.position),
+      rotation: xyzOf(poseRig.Hips.rotation),
+      worldPosition: xyzOf(poseRig.Hips.worldPosition),
+    };
+  }
+  if (poseRig._view) out._view = poseRig._view;
+  return out;
+}
+
+/**
+ * processPose — API duy nhất Flutter gọi.
+ *
+ * @param {string|object} jsonFrame  1 frame: { landmarks, timestampMs, ... }
+ *                                   landmarks[]: { index, xNorm, yNorm, z?, wx?, wy?, wz?, visibility }
+ */
+function processPose(jsonFrame) {
+  try {
+    if (typeof Kalidokit === 'undefined' || !Kalidokit.Pose) {
+      postToFlutter({ type: 'error', message: 'Kalidokit not loaded' });
+      return;
+    }
+
+    var frame = typeof jsonFrame === 'string' ? JSON.parse(jsonFrame) : jsonFrame;
+    if (!frame || !frame.landmarks || frame.landmarks.length < 5) {
+      postToFlutter({ type: 'error', message: 'Invalid frame: < 5 landmarks' });
+      return;
+    }
+
+    var built = buildLm3d(frame.landmarks);
+    var lm3d = built.lm3d;
+    var lm2d = buildLm2d(frame.landmarks);
+
+    // ── Solve: Kalidokit nhận lm3d (world MediaPipe-convention) + lm2d (screen) ──
+    var poseRigRaw = Kalidokit.Pose.solve(lm3d, lm2d, {
+      runtime: 'mediapipe',
+      enableLegs: true,
+    });
+
+    if (!poseRigRaw || !poseRigRaw.Hips) {
+      postToFlutter({ type: 'error', message: 'Kalidokit returned null/empty' });
+      return;
+    }
+
+    var poseRig = serializePoseRig(poseRigRaw);
+    // Post-process torso (side-view / yaw conflict) — KHÔNG đụng limb Euler từ Kalidokit
+    // trừ clamp lowerLeg.
+    poseRig = stabilizePoseRig(poseRig, lm2d, built.notes);
+
+    postToFlutter({
+      type: 'pose_solved',
+      timestampMs: frame.timestampMs != null ? frame.timestampMs : 0,
+      coordMode: built.mode,
+      coordNotes: built.notes,
+      view: poseRig._view || null,
+      poseRig: poseRig,
+    });
+  } catch (e) {
+    postToFlutter({
+      type: 'error',
+      message: (e && e.message) ? e.message : String(e),
+    });
+  }
+}
+
+function postToFlutter(data) {
+  try {
+    var payload = JSON.stringify(data);
+    if (window.PoseChannel && typeof window.PoseChannel.postMessage === 'function') {
+      window.PoseChannel.postMessage(payload);
+    }
+  } catch (err) {
+    // last resort: avoid throwing across bridge
+    if (window.PoseChannel && window.PoseChannel.postMessage) {
+      window.PoseChannel.postMessage(
+        JSON.stringify({ type: 'error', message: 'postToFlutter failed: ' + String(err) })
+      );
+    }
+  }
+}
+
+// Expose for Flutter runJavaScript('processPose(...)')
+window.processPose = processPose;
+
+// Ready signal (sau khi inject script + parse xong)
+setTimeout(function () {
+  if (typeof Kalidokit !== 'undefined' && Kalidokit.Pose) {
+    postToFlutter({
+      type: 'ready',
+      message: 'Kalidokit solver ready',
+      version: (Kalidokit.version != null) ? String(Kalidokit.version) : 'bundled',
+      // Tóm tắt convention để log phía Flutter
+      convention: {
+        lm3d: 'MediaPipe world Y-down (no flip before solve)',
+        lm2d: 'screen normalized 0..1 Y-down (no flip)',
+        output: 'Kalidokit poseRig Euler radians, raw keys',
+      },
+    });
+  } else {
+    postToFlutter({
+      type: 'error',
+      message: 'Kalidokit not loaded — check KALIDOKIT_SCRIPT inject from Flutter',
+    });
+  }
+}, 50);
+</script>
+</body>
+</html>

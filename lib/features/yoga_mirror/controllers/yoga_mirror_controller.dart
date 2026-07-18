@@ -28,6 +28,7 @@ class YogaMirrorController extends ChangeNotifier {
   final bool simulatorMode;
 
   PoseCapture? capture;
+
   /// All **loaded** frames so far (sorted by timestamp). Grows as chunks arrive.
   List<PoseFrame> frames = [];
   int durationMs = 0;
@@ -40,6 +41,7 @@ class YogaMirrorController extends ChangeNotifier {
   double? smoothedScore;
   List<String> feedback = ['Đang tải mẫu động tác...'];
   bool isLoading = true;
+
   /// True while more pose chunks still loading in background.
   bool isBufferingChunks = false;
   String? loadError;
@@ -62,7 +64,7 @@ class YogaMirrorController extends ChangeNotifier {
 
   /// Default: chunked meta (fast first paint). Falls back to monolith JSON path.
   Future<void> initialize({
-    String assetPath = AppAssets.treePoseMeta,
+    String assetPath = AppAssets.defaultPoseMeta,
   }) async {
     isLoading = true;
     loadError = null;
@@ -268,7 +270,9 @@ class YogaMirrorController extends ChangeNotifier {
       return;
     }
 
-    final end = endTimestampMs > 0 ? endTimestampMs : startTimestampMs + durationMs;
+    final end = endTimestampMs > 0
+        ? endTimestampMs
+        : startTimestampMs + durationMs;
     final next = currentTimeMs + (elapsedMs * playbackSpeed).round();
 
     if (next >= end) {
