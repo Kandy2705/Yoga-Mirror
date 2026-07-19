@@ -10,7 +10,12 @@ let enableRetarget = false;
 
 let mirrorGuide = false;
 let retargetParts = { torso: true, arms: true, legs: true };
-const rotationSmoothing = 0.4;
+const playbackRotationSmoothing = 0.4;
+const debugRotationSmoothing = 1.0;
+
+function currentRetargetAlpha() {
+  return isPlaying ? playbackRotationSmoothing : debugRotationSmoothing;
+}
 
 
 let guideModelScale = 0.7;
@@ -93,9 +98,14 @@ const LANDMARK = {
   leftShoulder: 11, rightShoulder: 12,
   leftElbow: 13, rightElbow: 14,
   leftWrist: 15, rightWrist: 16,
+  leftPinky: 17, rightPinky: 18,
+  leftIndex: 19, rightIndex: 20,
+  leftThumb: 21, rightThumb: 22,
   leftHip: 23, rightHip: 24,
   leftKnee: 25, rightKnee: 26,
   leftAnkle: 27, rightAnkle: 28,
+  leftHeel: 29, rightHeel: 30,
+  leftFootIndex: 31, rightFootIndex: 32,
 };
 
 
@@ -733,7 +743,7 @@ function applyBoneDirectionChain(bone, fromWorld, toWorld, defaultDir, alpha) {
   getParentWorldQuatForRetarget(bone, _parentWorldQuat);
   const localQuat = _parentWorldQuat.clone().invert().multiply(_desiredWorldQuat);
 
-  bone.quaternion.slerp(localQuat, alpha ?? rotationSmoothing);
+  bone.quaternion.slerp(localQuat, alpha ?? currentRetargetAlpha());
   bone.updateMatrixWorld(true);
 }
 
@@ -1021,6 +1031,39 @@ function applyKalidoPlanarLegOverride(frame) {
   applySide('right', LANDMARK.rightHip, LANDMARK.rightKnee, LANDMARK.rightAnkle);
 }
 
+function applyKalidoPlanarArmOverride(frame) {
+  if (!vrm || !retargetParts.arms) return;
+
+  const applySide = (side, shoulderIndex, elbowIndex, wristIndex, indexIndex, thumbIndex) => {
+    const shoulder = landmarkToPlanarPoint(getLandmark(frame, shoulderIndex));
+    const elbow = landmarkToPlanarPoint(getLandmark(frame, elbowIndex));
+    const wrist = landmarkToPlanarPoint(getLandmark(frame, wristIndex));
+    const finger = landmarkToPlanarPoint(getLandmark(frame, indexIndex))
+      || landmarkToPlanarPoint(getLandmark(frame, thumbIndex));
+    if (!shoulder || !elbow || !wrist) return;
+
+    const prefix = side === 'left' ? 'left' : 'right';
+    const restDir = side === 'left'
+      ? new THREE.Vector3(-1, 0, 0)
+      : new THREE.Vector3(1, 0, 0);
+    const upperSegment = elbow.clone().sub(shoulder);
+    const lowerSegment = wrist.clone().sub(elbow);
+    if (upperSegment.lengthSq() < 1e-5 || lowerSegment.lengthSq() < 1e-5) return;
+
+    applyBoneDirectionChainByName(prefix + 'UpperArm', shoulder, elbow, restDir, 0.75);
+    vrm.scene.updateMatrixWorld(true);
+    applyBoneDirectionChainByName(prefix + 'LowerArm', elbow, wrist, restDir, 0.85);
+    vrm.scene.updateMatrixWorld(true);
+    if (finger) {
+      applyBoneDirectionChainByName(prefix + 'Hand', wrist, finger, restDir, 0.45);
+      vrm.scene.updateMatrixWorld(true);
+    }
+  };
+
+  applySide('left', LANDMARK.leftShoulder, LANDMARK.leftElbow, LANDMARK.leftWrist, LANDMARK.leftIndex, LANDMARK.leftThumb);
+  applySide('right', LANDMARK.rightShoulder, LANDMARK.rightElbow, LANDMARK.rightWrist, LANDMARK.rightIndex, LANDMARK.rightThumb);
+}
+
 function applyKalidoPoseToVrm(riggedPose) {
   if (!vrm || !riggedPose) return false;
   
@@ -1051,7 +1094,7 @@ function applyKalidoPoseToVrm(riggedPose) {
     if (kalidoKey === 'Spine' || kalidoKey === 'Chest') {
       q.slerp(new THREE.Quaternion(), 0.35);
     }
-    bone.quaternion.slerp(q, rotationSmoothing);
+    bone.quaternion.slerp(q, currentRetargetAlpha());
     bone.updateMatrixWorld(true);
   }
 
@@ -1076,8 +1119,11 @@ function applyPoseToVrm(frame) {
       
       
       poseBodyYaw = 0;
-      lastRetargetMode = 'kalidokit-only';
+      lastRetargetMode = 'kalidokit+direction-correction';
       applyKalidoPoseToVrm(riggedPose);
+      applyKalidoTorsoLeanOverride(frame);
+      applyKalidoPlanarArmOverride(frame);
+      applyKalidoPlanarLegOverride(frame);
       updateDepthHud(frame);
       return;
     }
