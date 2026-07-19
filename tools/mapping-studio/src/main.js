@@ -36,29 +36,29 @@ const HUMANOID_BONES = [
   'rightThumbMetacarpal', 'rightThumbProximal', 'rightThumbDistal',
   'rightIndexProximal', 'rightIndexIntermediate', 'rightIndexDistal',
 ];
-// Anatomical map (same side) — verified in Mapping Studio. mirror checkbox = false by default.
+// Camera-facing mirrored map verified in Mapping Studio for the current yoga data.
+// Keep mirror checkbox = false: the explicit cross-side entries below are the actual mapping.
 const DEFAULT_MAPPING = {
   head: 'nose',
-  leftUpperArm: 'leftShoulder',
-  leftLowerArm: 'leftElbow',
-  leftHand: 'leftWrist',
-  rightUpperArm: 'rightShoulder',
-  rightLowerArm: 'rightElbow',
-  rightHand: 'rightWrist',
-  leftThumbProximal: 'leftThumb',
-  leftIndexProximal: 'leftIndex',
-  leftIndexDistal: 'leftPinky',
-  rightThumbProximal: 'rightThumb',
-  rightIndexProximal: 'rightIndex',
-  rightIndexDistal: 'rightPinky',
-  leftUpperLeg: 'leftHip',
-  leftLowerLeg: 'leftKnee',
-  leftFoot: 'leftAnkle',
-  leftToes: 'leftFootIndex',
-  rightUpperLeg: 'rightHip',
-  rightLowerLeg: 'rightKnee',
-  rightFoot: 'rightAnkle',
-  rightToes: 'rightFootIndex',
+  leftUpperArm: 'rightShoulder',
+  leftLowerArm: 'rightElbow',
+  leftHand: 'rightWrist',
+  rightUpperArm: 'leftShoulder',
+  rightLowerArm: 'leftElbow',
+  rightHand: 'leftWrist',
+  leftThumbProximal: 'rightThumb',
+  leftIndexProximal: 'rightPinky',
+  leftIndexDistal: 'rightIndex',
+  rightThumbProximal: 'leftIndex',
+  rightIndexProximal: 'leftPinky',
+  rightIndexDistal: 'leftIndex',
+  leftUpperLeg: 'rightHip',
+  leftLowerLeg: 'rightKnee',
+  leftFoot: 'rightAnkle',
+  rightUpperLeg: 'leftHip',
+  rightLowerLeg: 'leftKnee',
+  rightFoot: 'leftAnkle',
+  rightIndexIntermediate: 'leftIndex',
 };
 
 const $ = (id) => document.getElementById(id);
@@ -89,11 +89,11 @@ let displayMode = 'both';
 let retargetMode = 'idle';
 let solverMode = 'ik';
 let showNameLabels = false;
-let landmarksOnVrm = true; // chấm JSON thẳng lên người VRM
+let landmarksOnVrm = false; // chấm JSON thẳng lên người VRM
 let showSideJson = true; // skeleton JSON bên cạnh (offset)
 let fitMappedPoints = true; // scale/translate JSON by mapped bone pairs
 let snapMappedLandmarks = false; // force mapped JSON dots to VRM bone positions for checking
-let flipJsonDepth = true; // MediaPipe world Z front/back can be opposite of VRM
+let flipJsonDepth = false; // MediaPipe world Z front/back can be opposite of VRM
 let autoBodyYaw = true; // rotate the whole VRM toward JSON facing before limb correction
 let invertBodyYaw = false; // user override when MediaPipe handedness chooses the opposite facing normal
 let bodyYaw = 0;
@@ -160,11 +160,11 @@ document.querySelector('#app').innerHTML = `
         <option value="json">JSON skeleton only</option>
       </select>
       <label><input id="mirror" type="checkbox"> Mirror L/R in export (off = anatomical)</label>
-      <label><input id="face" type="checkbox"> Show face landmarks</label>
+      <label><input id="face" type="checkbox" checked> Show face landmarks</label>
       <label><input id="nameLabels" type="checkbox"> Show name labels (can clutter)</label>
-      <label><input id="lmOnVrm" type="checkbox" checked> Chấm mốc JSON lên người VRM</label>
+      <label><input id="lmOnVrm" type="checkbox"> Chấm mốc JSON lên người VRM</label>
       <label><input id="sideJson" type="checkbox" checked> JSON skeleton bên cạnh (offset)</label>
-      <label><input id="flipJsonDepth" type="checkbox" checked> Đảo chiều sâu JSON Z (sửa trước/sau)</label>
+      <label><input id="flipJsonDepth" type="checkbox"> Đảo chiều sâu JSON Z (sửa trước/sau)</label>
       <label><input id="fitMappedPoints" type="checkbox" checked> Fit JSON bằng mapped bone points</label>
       <label><input id="snapMapped" type="checkbox"> Ép mapped JSON trùng bone VRM</label>
       <label><input id="autoBodyYaw" type="checkbox" checked> Xoay nguyên thân VRM theo hướng JSON</label>
