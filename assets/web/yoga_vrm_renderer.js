@@ -10,12 +10,15 @@ let enableRetarget = false;
 
 let mirrorGuide = false;
 let retargetParts = { torso: true, arms: true, legs: true };
-// Match Mapping Studio: softer while playing, hard snap when paused for debug.
-const playbackRetargetAlpha = 0.5;
+// Guide JSON is keyframed truth: every apply resets to rest then sets bones.
+// If playback alpha < 1, play never reaches the pose that scrub (alpha=1) shows.
+// Soft slerp is for live jitter — not for pre-authored guide playback.
+const playbackRetargetAlpha = 1.0;
 const debugRetargetAlpha = 1.0;
 
 function currentRetargetAlpha(baseAlpha = playbackRetargetAlpha) {
-  return isPlaying ? baseAlpha : debugRetargetAlpha;
+  // Play and scrub both snap fully so motion matches frame-by-frame review.
+  return isPlaying ? playbackRetargetAlpha : debugRetargetAlpha;
 }
 
 
@@ -29,7 +32,10 @@ let guideModelZOffset = 0.0;
 let guideModelYaw = Math.PI;   
 
 let poseBodyYaw = 0;
+let poseBodyYawTarget = 0; // filtered facing target (outlier-safe)
 let poseBodyYawInitialized = false;
+/** Rotate whole VRM root toward JSON facing (shoulder/hip normal). */
+let autoBodyYaw = true;
 let lastRetargetMode = 'idle';
 
 
@@ -321,6 +327,7 @@ async function loadVrmFromBase64Internal(base64) {
     vrm = gltf.userData.vrm;
     if (!vrm) throw new Error('File is not a valid VRM (userData.vrm missing)');
     poseBodyYaw = 0;
+    poseBodyYawTarget = 0;
     poseBodyYawInitialized = false;
     step = 'vrm_parsed';
     reportStep(step);
@@ -835,18 +842,17 @@ function applyBoneWorldFromTo(boneName, from, to, planar = false, correctionScal
   } else {
     _desiredLocalQuat.setFromUnitVectors(_rest, _dir);
   }
-  bone.quaternion.slerp(
-    _desiredLocalQuat,
-    currentRetargetAlpha(0.5 * correctionScale),
-  );
+  // Full snap in both play & scrub (correctionScale kept for API compat only).
+  // Partial slerp after reset-to-rest was why play lagged behind scrub.
+  void correctionScale;
+  bone.quaternion.slerp(_desiredLocalQuat, currentRetargetAlpha());
   bone.updateMatrixWorld(true);
 }
 
 /** Legacy Kalidokit planar overrides — maps old signature onto studio IK. */
 function applyBoneDirectionChainByName(boneName, from, to, _defaultDir, alpha) {
-  const a = typeof alpha === 'number' ? alpha : 0.5;
-  // currentRetargetAlpha(0.5 * scale) ≈ a when playing if scale = 2a
-  applyBoneWorldFromTo(boneName, from, to, true, Math.max(0.1, a * 2));
+  const a = typeof alpha === 'number' ? alpha : 1;
+  applyBoneWorldFromTo(boneName, from, to, true, Math.max(0.1, a));
 }
 
 function captureRestPose() {
@@ -939,24 +945,59 @@ function computeJsonBodyYaw(frame) {
 }
 
 function applyJsonBodyYaw(frame) {
-  // Same smoothing as Mapping Studio mixerRoot yaw
-  const targetYaw = computeJsonBodyYaw(frame);
-  if (targetYaw == null) return;
-  if (!poseBodyYawInitialized) {
-    poseBodyYaw = targetYaw;
-    poseBodyYawInitialized = true;
-  } else {
-    const delta = shortestAngleDelta(poseBodyYaw, targetYaw);
-    // Ignore one-frame 180° flips from ambiguous side views
-    if (Math.abs(delta) > Math.PI * 0.55) return;
-    const maxStep = isPlaying ? 0.08 : 0.18;
-    poseBodyYaw += THREE.MathUtils.clamp(
-      delta * currentRetargetAlpha(0.35),
-      -maxStep,
-      maxStep,
-    );
+  // Two-stage smooth facing:
+  // 1) filter raw JSON yaw (reject ~180° flips, light EMA on target)
+  // 2) ease poseBodyYaw toward filtered target (play = mượt, scrub = snap)
+  if (!autoBodyYaw) {
+    poseBodyYaw = 0;
+    poseBodyYawTarget = 0;
+    poseBodyYawInitialized = false;
+    return;
   }
+
+  const rawYaw = computeJsonBodyYaw(frame);
+  if (rawYaw == null) return;
+
+  if (!poseBodyYawInitialized) {
+    poseBodyYaw = rawYaw;
+    poseBodyYawTarget = rawYaw;
+    poseBodyYawInitialized = true;
+    return;
+  }
+
+  // Stage 1: update filtered target — ignore single-frame opposite facing
+  const dTarget = shortestAngleDelta(poseBodyYawTarget, rawYaw);
+  if (Math.abs(dTarget) <= Math.PI * 0.55) {
+    // Play: soft absorb noise; scrub: take exact frame facing
+    const targetBlend = isPlaying ? 0.38 : 1.0;
+    poseBodyYawTarget += dTarget * targetBlend;
+    // keep in [-π, π] for stability
+    if (poseBodyYawTarget > Math.PI) poseBodyYawTarget -= Math.PI * 2;
+    if (poseBodyYawTarget < -Math.PI) poseBodyYawTarget += Math.PI * 2;
+  }
+
+  // Stage 2: ease displayed yaw toward filtered target
+  const delta = shortestAngleDelta(poseBodyYaw, poseBodyYawTarget);
+  if (!isPlaying) {
+    poseBodyYaw = poseBodyYawTarget;
+    return;
+  }
+  // ~smooth follow: not laggy (old 0.08), not jerky (near-snap 0.92)
+  const blend = 0.48;
+  const maxStep = 0.20; // ~11.5° per frame update
+  poseBodyYaw += THREE.MathUtils.clamp(delta * blend, -maxStep, maxStep);
 }
+
+window.setAutoBodyYaw = function (enabled) {
+  autoBodyYaw = !!enabled;
+  if (!autoBodyYaw) {
+    poseBodyYaw = 0;
+    poseBodyYawTarget = 0;
+    poseBodyYawInitialized = false;
+    applyGuideRootTransform();
+  }
+  console.log('[YogaVRM] autoBodyYaw =', autoBodyYaw);
+};
 
 
 

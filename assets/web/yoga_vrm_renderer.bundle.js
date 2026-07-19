@@ -30838,10 +30838,10 @@
   var enableRetarget = false;
   var mirrorGuide = false;
   var retargetParts = { torso: true, arms: true, legs: true };
-  var playbackRetargetAlpha = 0.5;
+  var playbackRetargetAlpha = 1;
   var debugRetargetAlpha = 1;
   function currentRetargetAlpha(baseAlpha = playbackRetargetAlpha) {
-    return isPlaying ? baseAlpha : debugRetargetAlpha;
+    return isPlaying ? playbackRetargetAlpha : debugRetargetAlpha;
   }
   var guideModelScale = 0.7;
   var guideModelScaleY = 1;
@@ -30850,7 +30850,9 @@
   var guideModelZOffset = 0;
   var guideModelYaw = Math.PI;
   var poseBodyYaw = 0;
+  var poseBodyYawTarget = 0;
   var poseBodyYawInitialized = false;
+  var autoBodyYaw = true;
   var lastRetargetMode = "idle";
   var guideModelPitch = 0;
   var baseNormalizeScale = 1;
@@ -31122,6 +31124,7 @@
       vrm = gltf.userData.vrm;
       if (!vrm) throw new Error("File is not a valid VRM (userData.vrm missing)");
       poseBodyYaw = 0;
+      poseBodyYawTarget = 0;
       poseBodyYawInitialized = false;
       step = "vrm_parsed";
       reportStep(step);
@@ -31571,10 +31574,8 @@
     } else {
       _desiredLocalQuat.setFromUnitVectors(_rest, _dir);
     }
-    bone.quaternion.slerp(
-      _desiredLocalQuat,
-      currentRetargetAlpha(0.5 * correctionScale)
-    );
+    void correctionScale;
+    bone.quaternion.slerp(_desiredLocalQuat, currentRetargetAlpha());
     bone.updateMatrixWorld(true);
   }
   function captureRestPose() {
@@ -31687,22 +31688,46 @@
     return Math.atan2(forward.x, forward.z);
   }
   function applyJsonBodyYaw(frame) {
-    const targetYaw = computeJsonBodyYaw(frame);
-    if (targetYaw == null) return;
-    if (!poseBodyYawInitialized) {
-      poseBodyYaw = targetYaw;
-      poseBodyYawInitialized = true;
-    } else {
-      const delta = shortestAngleDelta(poseBodyYaw, targetYaw);
-      if (Math.abs(delta) > Math.PI * 0.55) return;
-      const maxStep = isPlaying ? 0.08 : 0.18;
-      poseBodyYaw += MathUtils.clamp(
-        delta * currentRetargetAlpha(0.35),
-        -maxStep,
-        maxStep
-      );
+    if (!autoBodyYaw) {
+      poseBodyYaw = 0;
+      poseBodyYawTarget = 0;
+      poseBodyYawInitialized = false;
+      return;
     }
+    const rawYaw = computeJsonBodyYaw(frame);
+    if (rawYaw == null) return;
+    if (!poseBodyYawInitialized) {
+      poseBodyYaw = rawYaw;
+      poseBodyYawTarget = rawYaw;
+      poseBodyYawInitialized = true;
+      return;
+    }
+    const dTarget = shortestAngleDelta(poseBodyYawTarget, rawYaw);
+    if (Math.abs(dTarget) <= Math.PI * 0.55) {
+      const targetBlend = isPlaying ? 0.38 : 1;
+      poseBodyYawTarget += dTarget * targetBlend;
+      if (poseBodyYawTarget > Math.PI) poseBodyYawTarget -= Math.PI * 2;
+      if (poseBodyYawTarget < -Math.PI) poseBodyYawTarget += Math.PI * 2;
+    }
+    const delta = shortestAngleDelta(poseBodyYaw, poseBodyYawTarget);
+    if (!isPlaying) {
+      poseBodyYaw = poseBodyYawTarget;
+      return;
+    }
+    const blend = 0.48;
+    const maxStep = 0.2;
+    poseBodyYaw += MathUtils.clamp(delta * blend, -maxStep, maxStep);
   }
+  window.setAutoBodyYaw = function(enabled) {
+    autoBodyYaw = !!enabled;
+    if (!autoBodyYaw) {
+      poseBodyYaw = 0;
+      poseBodyYawTarget = 0;
+      poseBodyYawInitialized = false;
+      applyGuideRootTransform();
+    }
+    console.log("[YogaVRM] autoBodyYaw =", autoBodyYaw);
+  };
   function applyTorso(frame) {
     const ls = getLandmarkPoint(frame, LANDMARK.leftShoulder);
     const rs = getLandmarkPoint(frame, LANDMARK.rightShoulder);
