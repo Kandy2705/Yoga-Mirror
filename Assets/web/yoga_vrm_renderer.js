@@ -21,12 +21,15 @@ let guideModelYOffset = 1;  // up/down (lower = model sits lower in frame)
 let guideModelZOffset = 0.0;   // toward/away camera
 // Face user (this VRM shows back at 0). Change only if facing wrong again.
 let guideModelYaw = Math.PI;   // radians around Y (π = 180°)
+// Retarget-driven whole-body yaw for planar/no-world fallback only.
+let poseBodyYaw = 0;
+let lastRetargetMode = 'idle';
 // If model leans too far FORWARD toward camera, try small NEGATIVE pitch
 // e.g. -0.08 … -0.15. If leans BACK, try small positive.
 let guideModelPitch = 0;    // radians around X (tilt)
 // Base scale from normalizeVrmModel (bbox → targetHeight). Re-applied with multipliers.
 let baseNormalizeScale = 1;
-// Session-start body fit: lock after first successful auto/backend scale (mentor 2.2).
+// Session-start body fit: lock after first successful manual/backend scale (mentor 2.2).
 let sessionScaleLocked = false;
 
 // Camera: eye-level toward model (not high bird's-eye).
@@ -51,7 +54,7 @@ function applyGuideRootTransform() {
   guideRoot.position.set(0, guideModelYOffset, guideModelZOffset);
   // order YXZ: yaw then pitch feels natural for "stand and tip"
   guideRoot.rotation.order = 'YXZ';
-  guideRoot.rotation.set(guideModelPitch, guideModelYaw, 0);
+  guideRoot.rotation.set(guideModelPitch, guideModelYaw + poseBodyYaw, 0);
   // Scale lives on vrm.scene (see applyModelScale) so setGuideTransform can
   // change height/width without re-normalizing the mesh.
   guideRoot.scale.setScalar(1);
@@ -562,16 +565,34 @@ function getLandmark(frame, index) {
 
 // MediaPipe world: Y-down → Three Y-up; depth +wz (as when pose mapping looked good).
 // No guideModelYaw here — yaw is display-only on guideRoot (slider).
+function hasFiniteNumber(value) {
+  return typeof value === 'number' && Number.isFinite(value);
+}
+
+function landmarkHasWorld(lm) {
+  return !!lm && hasFiniteNumber(lm.wx) && hasFiniteNumber(lm.wy) && hasFiniteNumber(lm.wz);
+}
+
+function frameWorldLandmarkCount(frame) {
+  if (!frame?.landmarks) return 0;
+  return frame.landmarks.reduce((count, lm) => count + (landmarkHasWorld(lm) ? 1 : 0), 0);
+}
+
+function frameHasWorldLandmarks(frame) {
+  return frameWorldLandmarkCount(frame) >= 10;
+}
+
+// Three.js/debug/custom space: MediaPipe world Y-down → Three Y-up. If world is
+// missing, stay strictly planar (z=0); never treat image-space z as metric depth.
 function toWorldPoint(lm) {
   if (!lm) return null;
-  if (lm.wx != null) {
+  if (landmarkHasWorld(lm)) {
     return new THREE.Vector3(lm.wx, -lm.wy, lm.wz);
   }
   if (lm.xNorm != null && lm.yNorm != null) {
     const x = (lm.xNorm - 0.5) * 1.5;
     const y = -(lm.yNorm - 0.5) * 1.5;
-    const z = -((lm.z ?? 0) * 0.01);
-    return new THREE.Vector3(x, y, z);
+    return new THREE.Vector3(x, y, 0);
   }
   return null;
 }
@@ -851,9 +872,46 @@ function applyLeg(frame, side) {
 }
 
 // ─── Custom solver ────────────────────────────────────────────────────────────
+function computePlanarBodyYaw(frame) {
+  const ls = getLandmark(frame, LANDMARK.leftShoulder);
+  const rs = getLandmark(frame, LANDMARK.rightShoulder);
+  const lh = getLandmark(frame, LANDMARK.leftHip);
+  const rh = getLandmark(frame, LANDMARK.rightHip);
+  if (!ls || !rs || !lh || !rh) return 0;
+
+  const shoulderWidth = Math.abs((ls.xNorm ?? 0.5) - (rs.xNorm ?? 0.5));
+  const hipWidth = Math.abs((lh.xNorm ?? 0.5) - (rh.xNorm ?? 0.5));
+  const bodyWidth = Math.max(shoulderWidth, hipWidth);
+  const normalWidth = 0.23;
+  const collapse = Math.max(0, Math.min(1, 1 - bodyWidth / normalWidth));
+  if (collapse < 0.12) return 0;
+
+  // In custom_planar there is no trustworthy metric world depth, but 2D side
+  // view still needs whole-body yaw. Use image-z only as a left/right ordering
+  // hint (not as a 3D bone direction), then fall back to x-order handedness.
+  let yawSign = 0;
+  const leftDepth = [ls.z, lh.z].filter(hasFiniteNumber);
+  const rightDepth = [rs.z, rh.z].filter(hasFiniteNumber);
+  if (leftDepth.length && rightDepth.length) {
+    const avg = (arr) => arr.reduce((sum, value) => sum + value, 0) / arr.length;
+    const dz = avg(leftDepth) - avg(rightDepth);
+    if (Math.abs(dz) > 0.015) {
+      // MediaPipe image z: smaller usually means closer to camera.
+      yawSign = dz < 0 ? -1 : 1;
+    }
+  }
+  if (yawSign === 0) {
+    yawSign = ((ls.xNorm ?? 0) + (lh.xNorm ?? 0)) > ((rs.xNorm ?? 0) + (rh.xNorm ?? 0)) ? 1 : -1;
+  }
+
+  return yawSign * collapse * (Math.PI * 0.48);
+}
+
 function applyCustomPose(frame) {
   if (!vrm) return;
   if (frame.personDetected === false) return;
+  lastRetargetMode = 'custom_planar';
+  poseBodyYaw = THREE.MathUtils.lerp(poseBodyYaw, computePlanarBodyYaw(frame), 0.2);
   if (retargetParts.torso) applyTorso(frame);
   if (retargetParts.arms) { applyArm(frame, 'left'); applyArm(frame, 'right'); }
   if (retargetParts.legs) { applyLeg(frame, 'left'); applyLeg(frame, 'right'); }
@@ -875,8 +933,8 @@ function frameToKalidoKitInputs(frame) {
   );
 
   const poseWorld3DArray = byIndex.map(lm =>
-    lm
-      ? { x: lm.wx ?? 0, y: -(lm.wy ?? 0), z: -(lm.wz ?? 0), visibility: lm.visibility ?? 0 }
+    lm && landmarkHasWorld(lm)
+      ? { x: lm.wx, y: lm.wy, z: lm.wz, visibility: lm.visibility ?? 0 }
       : { x: 0, y: 0, z: 0, visibility: 0 }
   );
 
@@ -902,11 +960,104 @@ const KALIDOKIT_DIRECT_MAP = {
   LeftLowerLeg: 'leftLowerLeg', RightLowerLeg: 'rightLowerLeg',
 };
 
+function landmarkToPlanarPoint(lm) {
+  if (!lm || lm.xNorm == null || lm.yNorm == null) return null;
+  return new THREE.Vector3(
+    ((lm.xNorm ?? 0.5) - 0.5) * 1.5,
+    -((lm.yNorm ?? 0.5) - 0.5) * 1.5,
+    0,
+  );
+}
+
+function midpointPlanar(a, b) {
+  const pa = landmarkToPlanarPoint(a);
+  const pb = landmarkToPlanarPoint(b);
+  return midpoint(pa, pb);
+}
+
+function applyKalidoTorsoLeanOverride(frame) {
+  if (!vrm || !retargetParts.torso) return;
+
+  // Kalidokit is good for twist/yaw, but in deep side-view forward folds it can
+  // under-drive the avatar torso. Add a conservative silhouette lean from the
+  // hip→shoulder line, keeping it planar (z=0) so we do not reintroduce 3D
+  // corkscrew from world depth.
+  const ls = getLandmark(frame, LANDMARK.leftShoulder);
+  const rs = getLandmark(frame, LANDMARK.rightShoulder);
+  const lh = getLandmark(frame, LANDMARK.leftHip);
+  const rh = getLandmark(frame, LANDMARK.rightHip);
+  const noseLm = getLandmark(frame, LANDMARK.nose);
+  if (!ls || !rs || !lh || !rh) return;
+
+  const shoulderCenter2d = midpointPlanar(ls, rs);
+  const hipCenter2d = midpointPlanar(lh, rh);
+  if (!shoulderCenter2d || !hipCenter2d) return;
+  const torsoDir = shoulderCenter2d.clone().sub(hipCenter2d);
+  if (torsoDir.lengthSq() < 1e-5) return;
+  torsoDir.normalize();
+
+  const leanAngle = Math.acos(THREE.MathUtils.clamp(torsoDir.dot(new THREE.Vector3(0, 1, 0)), -1, 1));
+  if (leanAngle < THREE.MathUtils.degToRad(10)) return;
+
+  const torsoAlpha = THREE.MathUtils.clamp((leanAngle - THREE.MathUtils.degToRad(8)) / THREE.MathUtils.degToRad(45), 0.15, 0.65);
+  applyBoneDirectionChainByName('hips', hipCenter2d, shoulderCenter2d, new THREE.Vector3(0, 1, 0), torsoAlpha * 0.45);
+  vrm.scene.updateMatrixWorld(true);
+  applyBoneDirectionChainByName('spine', hipCenter2d, shoulderCenter2d, new THREE.Vector3(0, 1, 0), torsoAlpha * 0.75);
+  vrm.scene.updateMatrixWorld(true);
+  applyBoneDirectionChainByName('chest', hipCenter2d, shoulderCenter2d, new THREE.Vector3(0, 1, 0), torsoAlpha);
+  vrm.scene.updateMatrixWorld(true);
+
+  if (noseLm) {
+    const nose2d = landmarkToPlanarPoint(noseLm);
+    if (!nose2d) return;
+    applyBoneDirectionChainByName('neck', shoulderCenter2d, nose2d, new THREE.Vector3(0, 1, 0), torsoAlpha * 0.55);
+    vrm.scene.updateMatrixWorld(true);
+    applyBoneDirectionChainByName('head', shoulderCenter2d, nose2d, new THREE.Vector3(0, 1, 0), torsoAlpha * 0.45);
+    vrm.scene.updateMatrixWorld(true);
+  }
+}
+
+function applyKalidoPlanarLegOverride(frame) {
+  if (!vrm || !retargetParts.legs) return;
+
+  // A VRM skeleton cannot translate a knee node onto a MediaPipe dot without
+  // stretching the mesh. The safe approximation is IK-like: rotate thigh/shin
+  // toward the hip→knee and knee→ankle silhouette segments using fixed bone
+  // lengths. This pulls the rendered knees toward the blue debug knees without
+  // assigning bone.position from landmarks.
+  const applySide = (side, hipIndex, kneeIndex, ankleIndex) => {
+    const hip = landmarkToPlanarPoint(getLandmark(frame, hipIndex));
+    const knee = landmarkToPlanarPoint(getLandmark(frame, kneeIndex));
+    const ankle = landmarkToPlanarPoint(getLandmark(frame, ankleIndex));
+    if (!hip || !knee || !ankle) return;
+
+    const prefix = side === 'left' ? 'left' : 'right';
+    const hipToKnee = knee.clone().sub(hip);
+    const kneeToAnkle = ankle.clone().sub(knee);
+    if (hipToKnee.lengthSq() < 1e-5 || kneeToAnkle.lengthSq() < 1e-5) return;
+
+    // Stronger than generic smoothing because this is a post-Kalidokit correction
+    // for side-view knee placement, but still below 1.0 to avoid frame jitter.
+    const upperAlpha = 0.85;
+    const lowerAlpha = 0.9;
+    const down = new THREE.Vector3(0, -1, 0);
+    applyBoneDirectionChainByName(prefix + 'UpperLeg', hip, knee, down, upperAlpha);
+    vrm.scene.updateMatrixWorld(true);
+    applyBoneDirectionChainByName(prefix + 'LowerLeg', knee, ankle, down, lowerAlpha);
+    vrm.scene.updateMatrixWorld(true);
+    applyBoneDirectionChainByName(prefix + 'Foot', knee, ankle, down, 0.45);
+    vrm.scene.updateMatrixWorld(true);
+  };
+
+  applySide('left', LANDMARK.leftHip, LANDMARK.leftKnee, LANDMARK.leftAnkle);
+  applySide('right', LANDMARK.rightHip, LANDMARK.rightKnee, LANDMARK.rightAnkle);
+}
+
 function applyKalidoPoseToVrm(riggedPose) {
   if (!vrm || !riggedPose) return false;
-  // Always use mirror map so Kalidokit matches manual BONE_LANDMARK_MAP L/R cross.
-  // (mirrorGuide only toggles legacy getBone name-swap; keep it false.)
-  const boneMap = KALIDOKIT_MIRROR_MAP;
+  // Use the official/direct Kalidokit → VRM humanoid mapping. Avoid stacking a
+  // mirror map with guideRoot display yaw, which previously encouraged twisting.
+  const boneMap = KALIDOKIT_DIRECT_MAP;
 
   for (const [kalidoKey, vrmBone] of Object.entries(boneMap)) {
     const src = riggedPose[kalidoKey];
@@ -929,6 +1080,9 @@ function applyKalidoPoseToVrm(riggedPose) {
       q = new THREE.Quaternion().setFromEuler(euler);
     }
 
+    if (kalidoKey === 'Spine' || kalidoKey === 'Chest') {
+      q.slerp(new THREE.Quaternion(), 0.35);
+    }
     bone.quaternion.slerp(q, rotationSmoothing);
     bone.updateMatrixWorld(true);
   }
@@ -938,28 +1092,47 @@ function applyKalidoPoseToVrm(riggedPose) {
 }
 
 // ─── Main retarget pipeline ───────────────────────────────────────────────────
-// Force custom solver so BONE_LANDMARK_MAP (manual tool) always drives the mesh.
-// Kalidokit path kept in file for optional re-enable later.
-const USE_CUSTOM_SOLVER_ONLY = true;
-
 function applyPoseToVrm(frame) {
   if (!vrm || !enableRetarget) return;
   if (!isValidFrame(frame)) return;
 
-  if (!USE_CUSTOM_SOLVER_ONLY) {
-    const allPartsEnabled = retargetParts.torso && retargetParts.arms && retargetParts.legs;
-    if (Kalidokit && allPartsEnabled) {
-      const { poseLandmarkArray, poseWorld3DArray } = frameToKalidoKitInputs(frame);
-      const riggedPose = Kalidokit.Pose.solve(poseWorld3DArray, poseLandmarkArray, {
-        runtime: 'mediapipe',
-        video: null,
-        enableLegs: true,
-      });
-      if (riggedPose?.Hips) { applyKalidoPoseToVrm(riggedPose); return; }
+  const allPartsEnabled = retargetParts.torso && retargetParts.arms && retargetParts.legs;
+  if (frameHasWorldLandmarks(frame) && Kalidokit && allPartsEnabled) {
+    const { poseLandmarkArray, poseWorld3DArray } = frameToKalidoKitInputs(frame);
+    const riggedPose = Kalidokit.Pose.solve(poseWorld3DArray, poseLandmarkArray, {
+      runtime: 'mediapipe',
+      video: null,
+      enableLegs: true,
+    });
+    if (riggedPose?.Hips) {
+      poseBodyYaw = 0;
+      lastRetargetMode = 'kalidokit';
+      applyKalidoPoseToVrm(riggedPose);
+      applyKalidoTorsoLeanOverride(frame);
+      applyKalidoPlanarLegOverride(frame);
+      updateDepthHud(frame);
+      return;
     }
   }
 
   applyCustomPose(frame);
+  updateDepthHud(frame);
+}
+
+
+function updateDepthHud(frame) {
+  if (!statusEl || !frame?.landmarks?.length) return;
+  const nose = frame.landmarks.find((l) => l.index === LANDMARK.nose);
+  const ls = frame.landmarks.find((l) => l.index === LANDMARK.leftShoulder);
+  const rs = frame.landmarks.find((l) => l.index === LANDMARK.rightShoulder);
+  const fmt = (v) => hasFiniteNumber(v) ? v.toFixed(3) : '--';
+  const shDx = (ls && rs && hasFiniteNumber(ls.xNorm) && hasFiniteNumber(rs.xNorm))
+    ? Math.abs(ls.xNorm - rs.xNorm)
+    : null;
+  statusEl.textContent = `mode=${lastRetargetMode} world=${frameWorldLandmarkCount(frame)} `
+    + `nose z=${fmt(nose?.z)} wx=${fmt(nose?.wx)} wy=${fmt(nose?.wy)} wz=${fmt(nose?.wz)} `
+    + `shΔx=${fmt(shDx)} yaw=${poseBodyYaw.toFixed(2)}`;
+  statusEl.style.display = 'block';
 }
 
 // ─── Global API (Flutter gọi qua runJavaScript) ───────────────────────────────

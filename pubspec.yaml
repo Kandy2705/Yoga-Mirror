@@ -65,6 +65,7 @@ flutter:
     # Chunked poses (lazy load). Monolith .json files are tooling source, not bundled.
     - assets/poses/tree_pose/
     - assets/poses/sapiens2_to_mediapipe_video_3/
+    - assets/poses/sapiens2_to_mediapipe_video_3_with_z/
     - assets/poses/new_exercise/
     - assets/poses/MediaPipe-video1/
     - assets/poses/part_3_sapiens_pose/

@@ -30939,7 +30939,7 @@
   };
   FaceSolver.stabilizeBlink = stabilizeBlink;
 
-  // assets/web/yoga_vrm_renderer.js
+  // Assets/web/yoga_vrm_renderer.js
   var enableRetarget = false;
   var mirrorGuide = false;
   var retargetParts = { torso: true, arms: true, legs: true };
@@ -30950,6 +30950,8 @@
   var guideModelYOffset = 1;
   var guideModelZOffset = 0;
   var guideModelYaw = Math.PI;
+  var poseBodyYaw = 0;
+  var lastRetargetMode = "idle";
   var guideModelPitch = 0;
   var baseNormalizeScale = 1;
   var sessionScaleLocked = false;
@@ -30969,7 +30971,7 @@
     if (!guideRoot) return;
     guideRoot.position.set(0, guideModelYOffset, guideModelZOffset);
     guideRoot.rotation.order = "YXZ";
-    guideRoot.rotation.set(guideModelPitch, guideModelYaw, 0);
+    guideRoot.rotation.set(guideModelPitch, guideModelYaw + poseBodyYaw, 0);
     guideRoot.scale.setScalar(1);
     applyModelScale();
   }
@@ -31408,16 +31410,28 @@
     if (!lm || !isVisible(lm)) return null;
     return lm;
   }
+  function hasFiniteNumber(value) {
+    return typeof value === "number" && Number.isFinite(value);
+  }
+  function landmarkHasWorld(lm) {
+    return !!lm && hasFiniteNumber(lm.wx) && hasFiniteNumber(lm.wy) && hasFiniteNumber(lm.wz);
+  }
+  function frameWorldLandmarkCount(frame) {
+    if (!frame?.landmarks) return 0;
+    return frame.landmarks.reduce((count, lm) => count + (landmarkHasWorld(lm) ? 1 : 0), 0);
+  }
+  function frameHasWorldLandmarks(frame) {
+    return frameWorldLandmarkCount(frame) >= 10;
+  }
   function toWorldPoint(lm) {
     if (!lm) return null;
-    if (lm.wx != null) {
+    if (landmarkHasWorld(lm)) {
       return new Vector3(lm.wx, -lm.wy, lm.wz);
     }
     if (lm.xNorm != null && lm.yNorm != null) {
       const x = (lm.xNorm - 0.5) * 1.5;
       const y = -(lm.yNorm - 0.5) * 1.5;
-      const z = -((lm.z ?? 0) * 0.01);
-      return new Vector3(x, y, z);
+      return new Vector3(x, y, 0);
     }
     return null;
   }
@@ -31651,9 +31665,38 @@
       vrm.scene.updateMatrixWorld(true);
     }
   }
+  function computePlanarBodyYaw(frame) {
+    const ls = getLandmark(frame, LANDMARK.leftShoulder);
+    const rs = getLandmark(frame, LANDMARK.rightShoulder);
+    const lh = getLandmark(frame, LANDMARK.leftHip);
+    const rh = getLandmark(frame, LANDMARK.rightHip);
+    if (!ls || !rs || !lh || !rh) return 0;
+    const shoulderWidth = Math.abs((ls.xNorm ?? 0.5) - (rs.xNorm ?? 0.5));
+    const hipWidth = Math.abs((lh.xNorm ?? 0.5) - (rh.xNorm ?? 0.5));
+    const bodyWidth = Math.max(shoulderWidth, hipWidth);
+    const normalWidth = 0.23;
+    const collapse = Math.max(0, Math.min(1, 1 - bodyWidth / normalWidth));
+    if (collapse < 0.12) return 0;
+    let yawSign = 0;
+    const leftDepth = [ls.z, lh.z].filter(hasFiniteNumber);
+    const rightDepth = [rs.z, rh.z].filter(hasFiniteNumber);
+    if (leftDepth.length && rightDepth.length) {
+      const avg = (arr) => arr.reduce((sum, value) => sum + value, 0) / arr.length;
+      const dz = avg(leftDepth) - avg(rightDepth);
+      if (Math.abs(dz) > 0.015) {
+        yawSign = dz < 0 ? -1 : 1;
+      }
+    }
+    if (yawSign === 0) {
+      yawSign = (ls.xNorm ?? 0) + (lh.xNorm ?? 0) > (rs.xNorm ?? 0) + (rh.xNorm ?? 0) ? 1 : -1;
+    }
+    return yawSign * collapse * (Math.PI * 0.48);
+  }
   function applyCustomPose(frame) {
     if (!vrm) return;
     if (frame.personDetected === false) return;
+    lastRetargetMode = "custom_planar";
+    poseBodyYaw = MathUtils.lerp(poseBodyYaw, computePlanarBodyYaw(frame), 0.2);
     if (retargetParts.torso) applyTorso(frame);
     if (retargetParts.arms) {
       applyArm(frame, "left");
@@ -31674,30 +31717,99 @@
       (lm) => lm ? { x: lm.xNorm, y: lm.yNorm, z: lm.z ?? 0, visibility: lm.visibility ?? 0 } : { x: 0.5, y: 0.5, z: 0, visibility: 0 }
     );
     const poseWorld3DArray = byIndex.map(
-      (lm) => lm ? { x: lm.wx ?? 0, y: -(lm.wy ?? 0), z: -(lm.wz ?? 0), visibility: lm.visibility ?? 0 } : { x: 0, y: 0, z: 0, visibility: 0 }
+      (lm) => lm && landmarkHasWorld(lm) ? { x: lm.wx, y: lm.wy, z: lm.wz, visibility: lm.visibility ?? 0 } : { x: 0, y: 0, z: 0, visibility: 0 }
     );
     return { poseLandmarkArray, poseWorld3DArray };
   }
-  var KALIDOKIT_MIRROR_MAP = {
+  var KALIDOKIT_DIRECT_MAP = {
     Hips: "hips",
     Spine: "spine",
     Chest: "chest",
     Neck: "neck",
     Head: "head",
-    LeftUpperArm: "rightUpperArm",
-    RightUpperArm: "leftUpperArm",
-    LeftLowerArm: "rightLowerArm",
-    RightLowerArm: "leftLowerArm",
-    LeftHand: "rightHand",
-    RightHand: "leftHand",
-    LeftUpperLeg: "rightUpperLeg",
-    RightUpperLeg: "leftUpperLeg",
-    LeftLowerLeg: "rightLowerLeg",
-    RightLowerLeg: "leftLowerLeg"
+    LeftUpperArm: "leftUpperArm",
+    RightUpperArm: "rightUpperArm",
+    LeftLowerArm: "leftLowerArm",
+    RightLowerArm: "rightLowerArm",
+    LeftHand: "leftHand",
+    RightHand: "rightHand",
+    LeftUpperLeg: "leftUpperLeg",
+    RightUpperLeg: "rightUpperLeg",
+    LeftLowerLeg: "leftLowerLeg",
+    RightLowerLeg: "rightLowerLeg"
   };
+  function landmarkToPlanarPoint(lm) {
+    if (!lm || lm.xNorm == null || lm.yNorm == null) return null;
+    return new Vector3(
+      ((lm.xNorm ?? 0.5) - 0.5) * 1.5,
+      -((lm.yNorm ?? 0.5) - 0.5) * 1.5,
+      0
+    );
+  }
+  function midpointPlanar(a, b) {
+    const pa = landmarkToPlanarPoint(a);
+    const pb = landmarkToPlanarPoint(b);
+    return midpoint(pa, pb);
+  }
+  function applyKalidoTorsoLeanOverride(frame) {
+    if (!vrm || !retargetParts.torso) return;
+    const ls = getLandmark(frame, LANDMARK.leftShoulder);
+    const rs = getLandmark(frame, LANDMARK.rightShoulder);
+    const lh = getLandmark(frame, LANDMARK.leftHip);
+    const rh = getLandmark(frame, LANDMARK.rightHip);
+    const noseLm = getLandmark(frame, LANDMARK.nose);
+    if (!ls || !rs || !lh || !rh) return;
+    const shoulderCenter2d = midpointPlanar(ls, rs);
+    const hipCenter2d = midpointPlanar(lh, rh);
+    if (!shoulderCenter2d || !hipCenter2d) return;
+    const torsoDir = shoulderCenter2d.clone().sub(hipCenter2d);
+    if (torsoDir.lengthSq() < 1e-5) return;
+    torsoDir.normalize();
+    const leanAngle = Math.acos(MathUtils.clamp(torsoDir.dot(new Vector3(0, 1, 0)), -1, 1));
+    if (leanAngle < MathUtils.degToRad(10)) return;
+    const torsoAlpha = MathUtils.clamp((leanAngle - MathUtils.degToRad(8)) / MathUtils.degToRad(45), 0.15, 0.65);
+    applyBoneDirectionChainByName("hips", hipCenter2d, shoulderCenter2d, new Vector3(0, 1, 0), torsoAlpha * 0.45);
+    vrm.scene.updateMatrixWorld(true);
+    applyBoneDirectionChainByName("spine", hipCenter2d, shoulderCenter2d, new Vector3(0, 1, 0), torsoAlpha * 0.75);
+    vrm.scene.updateMatrixWorld(true);
+    applyBoneDirectionChainByName("chest", hipCenter2d, shoulderCenter2d, new Vector3(0, 1, 0), torsoAlpha);
+    vrm.scene.updateMatrixWorld(true);
+    if (noseLm) {
+      const nose2d = landmarkToPlanarPoint(noseLm);
+      if (!nose2d) return;
+      applyBoneDirectionChainByName("neck", shoulderCenter2d, nose2d, new Vector3(0, 1, 0), torsoAlpha * 0.55);
+      vrm.scene.updateMatrixWorld(true);
+      applyBoneDirectionChainByName("head", shoulderCenter2d, nose2d, new Vector3(0, 1, 0), torsoAlpha * 0.45);
+      vrm.scene.updateMatrixWorld(true);
+    }
+  }
+  function applyKalidoPlanarLegOverride(frame) {
+    if (!vrm || !retargetParts.legs) return;
+    const applySide = (side, hipIndex, kneeIndex, ankleIndex) => {
+      const hip = landmarkToPlanarPoint(getLandmark(frame, hipIndex));
+      const knee = landmarkToPlanarPoint(getLandmark(frame, kneeIndex));
+      const ankle = landmarkToPlanarPoint(getLandmark(frame, ankleIndex));
+      if (!hip || !knee || !ankle) return;
+      const prefix = side === "left" ? "left" : "right";
+      const hipToKnee = knee.clone().sub(hip);
+      const kneeToAnkle = ankle.clone().sub(knee);
+      if (hipToKnee.lengthSq() < 1e-5 || kneeToAnkle.lengthSq() < 1e-5) return;
+      const upperAlpha = 0.85;
+      const lowerAlpha = 0.9;
+      const down = new Vector3(0, -1, 0);
+      applyBoneDirectionChainByName(prefix + "UpperLeg", hip, knee, down, upperAlpha);
+      vrm.scene.updateMatrixWorld(true);
+      applyBoneDirectionChainByName(prefix + "LowerLeg", knee, ankle, down, lowerAlpha);
+      vrm.scene.updateMatrixWorld(true);
+      applyBoneDirectionChainByName(prefix + "Foot", knee, ankle, down, 0.45);
+      vrm.scene.updateMatrixWorld(true);
+    };
+    applySide("left", LANDMARK.leftHip, LANDMARK.leftKnee, LANDMARK.leftAnkle);
+    applySide("right", LANDMARK.rightHip, LANDMARK.rightKnee, LANDMARK.rightAnkle);
+  }
   function applyKalidoPoseToVrm(riggedPose) {
     if (!vrm || !riggedPose) return false;
-    const boneMap = KALIDOKIT_MIRROR_MAP;
+    const boneMap = KALIDOKIT_DIRECT_MAP;
     for (const [kalidoKey, vrmBone] of Object.entries(boneMap)) {
       const src = riggedPose[kalidoKey];
       if (!src) continue;
@@ -31717,32 +31829,48 @@
         const euler = new Euler(rotationData.x, rotationData.y, rotationData.z, "XYZ");
         q = new Quaternion().setFromEuler(euler);
       }
+      if (kalidoKey === "Spine" || kalidoKey === "Chest") {
+        q.slerp(new Quaternion(), 0.35);
+      }
       bone.quaternion.slerp(q, rotationSmoothing);
       bone.updateMatrixWorld(true);
     }
     vrm.humanoid.update(0);
     return true;
   }
-  var USE_CUSTOM_SOLVER_ONLY = true;
   function applyPoseToVrm(frame) {
     if (!vrm || !enableRetarget) return;
     if (!isValidFrame(frame)) return;
-    if (!USE_CUSTOM_SOLVER_ONLY) {
-      const allPartsEnabled = retargetParts.torso && retargetParts.arms && retargetParts.legs;
-      if (dist_exports && allPartsEnabled) {
-        const { poseLandmarkArray, poseWorld3DArray } = frameToKalidoKitInputs(frame);
-        const riggedPose = PoseSolver.solve(poseWorld3DArray, poseLandmarkArray, {
-          runtime: "mediapipe",
-          video: null,
-          enableLegs: true
-        });
-        if (riggedPose?.Hips) {
-          applyKalidoPoseToVrm(riggedPose);
-          return;
-        }
+    const allPartsEnabled = retargetParts.torso && retargetParts.arms && retargetParts.legs;
+    if (frameHasWorldLandmarks(frame) && dist_exports && allPartsEnabled) {
+      const { poseLandmarkArray, poseWorld3DArray } = frameToKalidoKitInputs(frame);
+      const riggedPose = PoseSolver.solve(poseWorld3DArray, poseLandmarkArray, {
+        runtime: "mediapipe",
+        video: null,
+        enableLegs: true
+      });
+      if (riggedPose?.Hips) {
+        poseBodyYaw = 0;
+        lastRetargetMode = "kalidokit";
+        applyKalidoPoseToVrm(riggedPose);
+        applyKalidoTorsoLeanOverride(frame);
+        applyKalidoPlanarLegOverride(frame);
+        updateDepthHud(frame);
+        return;
       }
     }
     applyCustomPose(frame);
+    updateDepthHud(frame);
+  }
+  function updateDepthHud(frame) {
+    if (!statusEl || !frame?.landmarks?.length) return;
+    const nose = frame.landmarks.find((l) => l.index === LANDMARK.nose);
+    const ls = frame.landmarks.find((l) => l.index === LANDMARK.leftShoulder);
+    const rs = frame.landmarks.find((l) => l.index === LANDMARK.rightShoulder);
+    const fmt = (v) => hasFiniteNumber(v) ? v.toFixed(3) : "--";
+    const shDx = ls && rs && hasFiniteNumber(ls.xNorm) && hasFiniteNumber(rs.xNorm) ? Math.abs(ls.xNorm - rs.xNorm) : null;
+    statusEl.textContent = `mode=${lastRetargetMode} world=${frameWorldLandmarkCount(frame)} nose z=${fmt(nose?.z)} wx=${fmt(nose?.wx)} wy=${fmt(nose?.wy)} wz=${fmt(nose?.wz)} sh\u0394x=${fmt(shDx)} yaw=${poseBodyYaw.toFixed(2)}`;
+    statusEl.style.display = "block";
   }
   window.applyPoseFrame = function(frameJson) {
     try {
