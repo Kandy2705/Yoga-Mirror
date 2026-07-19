@@ -90,6 +90,9 @@ let retargetMode = 'idle';
 let showNameLabels = false;
 let landmarksOnVrm = true; // chấm JSON thẳng lên người VRM
 let showSideJson = true; // skeleton JSON bên cạnh (offset)
+let fitMappedPoints = true; // scale/translate JSON by mapped bone pairs
+let snapMappedLandmarks = false; // force mapped JSON dots to VRM bone positions for checking
+let flipJsonDepth = true; // MediaPipe world Z front/back can be opposite of VRM
 let hoverInfo = null;
 const playbackRetargetAlpha = 0.5;
 const debugRetargetAlpha = 1.0;
@@ -155,6 +158,9 @@ document.querySelector('#app').innerHTML = `
       <label><input id="nameLabels" type="checkbox"> Show name labels (can clutter)</label>
       <label><input id="lmOnVrm" type="checkbox" checked> Chấm mốc JSON lên người VRM</label>
       <label><input id="sideJson" type="checkbox" checked> JSON skeleton bên cạnh (offset)</label>
+      <label><input id="flipJsonDepth" type="checkbox" checked> Đảo chiều sâu JSON Z (sửa trước/sau)</label>
+      <label><input id="fitMappedPoints" type="checkbox" checked> Fit JSON bằng mapped bone points</label>
+      <label><input id="snapMapped" type="checkbox"> Ép mapped JSON trùng bone VRM</label>
       <label><input id="flipJsonFacing" type="checkbox"> Xoay JSON 180° quanh Y (giữ shape)</label>
       <label><input id="yawMatchShoulders" type="checkbox"> Khớp hướng vai JSON↔VRM (chỉ yaw Y)</label>
     </section>
@@ -260,6 +266,18 @@ function initUi() {
     showSideJson = e.target.checked;
     if (frames[currentFrameIndex]) setFrame(currentFrameIndex);
     updateVisibility();
+  };
+  $('flipJsonDepth').onchange = (e) => {
+    flipJsonDepth = e.target.checked;
+    if (frames[currentFrameIndex]) setFrame(currentFrameIndex);
+  };
+  $('fitMappedPoints').onchange = (e) => {
+    fitMappedPoints = e.target.checked;
+    if (frames[currentFrameIndex]) setFrame(currentFrameIndex);
+  };
+  $('snapMapped').onchange = (e) => {
+    snapMappedLandmarks = e.target.checked;
+    if (frames[currentFrameIndex]) setFrame(currentFrameIndex);
   };
   $('flipJsonFacing').onchange = () => {
     if (frames[currentFrameIndex]) setFrame(currentFrameIndex);
@@ -405,7 +423,7 @@ function hasWorld(l) {
 }
 function toWorldPoint(l) {
   if (!l) return null;
-  if (hasWorld(l)) return new THREE.Vector3(l.wx, -l.wy, l.wz);
+  if (hasWorld(l)) return new THREE.Vector3(l.wx, -l.wy, flipJsonDepth ? -l.wz : l.wz);
   return new THREE.Vector3((l.xNorm - 0.5) * 2, -(l.yNorm - 0.5) * 2, 0);
 }
 
@@ -535,18 +553,82 @@ function computeJsonToVrmAlign(frame) {
     yOffset = groundY - (minLocalY + vrmHip.y);
   }
 
-  return {
+  const align = {
     mpHip: mpHip.clone(),
     vrmHip: vrmHip.clone(),
     scale,
     rotation,
     yOffset,
+    extraOffset: new THREE.Vector3(),
   };
+  applyMappedPointFit(frame, align);
+  return align;
 }
 
 function mid3(a, b) {
   if (!a || !b) return null;
   return new THREE.Vector3().addVectors(a, b).multiplyScalar(0.5);
+}
+
+function applyMappedPointFit(frame, align) {
+  if (!fitMappedPoints || !vrm?.humanoid || !frame?.landmarks?.length || !align) return;
+  const pairs = [];
+  const usedLandmarks = new Set();
+  for (const [boneName, lmName] of Object.entries(mapping)) {
+    if (!lmName || usedLandmarks.has(lmName)) continue;
+    const idx = LANDMARK[lmName];
+    const bone = vrm.humanoid.getNormalizedBoneNode(boneName);
+    const raw = idx != null ? toWorldPoint(lm(frame, idx)) : null;
+    if (!bone || !raw) continue;
+    usedLandmarks.add(lmName);
+    const source = raw.clone().sub(align.mpHip);
+    if (align.rotation) source.applyQuaternion(align.rotation);
+    const target = bone.getWorldPosition(new THREE.Vector3()).sub(align.vrmHip);
+    pairs.push({ source, target });
+  }
+  if (pairs.length < 3) return;
+
+  const sourceCenter = new THREE.Vector3();
+  const targetCenter = new THREE.Vector3();
+  for (const pair of pairs) {
+    sourceCenter.add(pair.source);
+    targetCenter.add(pair.target);
+  }
+  sourceCenter.multiplyScalar(1 / pairs.length);
+  targetCenter.multiplyScalar(1 / pairs.length);
+
+  let sourceRms = 0;
+  let targetRms = 0;
+  for (const pair of pairs) {
+    sourceRms += pair.source.distanceToSquared(sourceCenter);
+    targetRms += pair.target.distanceToSquared(targetCenter);
+  }
+  sourceRms = Math.sqrt(sourceRms / pairs.length);
+  targetRms = Math.sqrt(targetRms / pairs.length);
+  if (sourceRms > 1e-5 && targetRms > 1e-5) {
+    const mappedScale = THREE.MathUtils.clamp(targetRms / (sourceRms * align.scale), 0.35, 2.5);
+    align.scale *= mappedScale;
+  }
+
+  const residual = new THREE.Vector3();
+  for (const pair of pairs) {
+    const fitted = pair.source.clone().multiplyScalar(align.scale);
+    fitted.y += align.yOffset || 0;
+    residual.add(pair.target.clone().sub(fitted));
+  }
+  align.extraOffset.copy(residual.multiplyScalar(1 / pairs.length));
+}
+
+function mappedBoneTargets() {
+  const targets = new Map();
+  if (!snapMappedLandmarks || !vrm?.humanoid) return targets;
+  for (const [boneName, lmName] of Object.entries(mapping)) {
+    if (!lmName || targets.has(lmName)) continue;
+    const bone = vrm.humanoid.getNormalizedBoneNode(boneName);
+    if (!bone) continue;
+    targets.set(lmName, bone.getWorldPosition(new THREE.Vector3()));
+  }
+  return targets;
 }
 
 /** Map one landmark into VRM-aligned world space (preserves JSON shape). */
@@ -556,6 +638,7 @@ function toVrmBodyPoint(l, align) {
   const local = raw.clone().sub(align.mpHip).multiplyScalar(align.scale);
   if (align.rotation) local.applyQuaternion(align.rotation);
   local.y += align.yOffset || 0;
+  if (align.extraOffset) local.add(align.extraOffset);
   return local.add(align.vrmHip);
 }
 
@@ -629,6 +712,7 @@ function drawPose(frame) {
   // ── A) Landmarks ON VRM body (pink dots + yellow stick figure) ──
   if (landmarksOnVrm && align) {
     const ptsOn = new Map();
+    const snapTargets = mappedBoneTargets();
     const lineMat = new THREE.LineBasicMaterial({
       color: 0xff6b8a,
       transparent: true,
@@ -637,7 +721,7 @@ function drawPose(frame) {
     });
     for (const l of frame.landmarks || []) {
       if (l.index < 11 && !showFace) continue;
-      const p = toVrmBodyPoint(l, align);
+      const p = snapTargets.get(l.name)?.clone() || toVrmBodyPoint(l, align);
       if (!p) continue;
       ptsOn.set(l.index, p.clone());
 
