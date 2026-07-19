@@ -90,7 +90,18 @@ let retargetMode = 'idle';
 let showNameLabels = false;
 let landmarksOnVrm = true; // chấm JSON thẳng lên người VRM
 let showSideJson = true; // skeleton JSON bên cạnh (offset)
+let fitMappedPoints = true; // scale/translate JSON by mapped bone pairs
+let snapMappedLandmarks = false; // force mapped JSON dots to VRM bone positions for checking
+let flipJsonDepth = true; // MediaPipe world Z front/back can be opposite of VRM
 let hoverInfo = null;
+const calibratedRestDirs = new Map();
+const playbackRetargetAlpha = 0.5;
+const debugRetargetAlpha = 1.0;
+
+function currentRetargetAlpha(baseAlpha = playbackRetargetAlpha) {
+  return playing ? baseAlpha : debugRetargetAlpha;
+}
+
 const _parentQ = new THREE.Quaternion();
 const _dir = new THREE.Vector3();
 const _rest = new THREE.Vector3();
@@ -148,6 +159,9 @@ document.querySelector('#app').innerHTML = `
       <label><input id="nameLabels" type="checkbox"> Show name labels (can clutter)</label>
       <label><input id="lmOnVrm" type="checkbox" checked> Chấm mốc JSON lên người VRM</label>
       <label><input id="sideJson" type="checkbox" checked> JSON skeleton bên cạnh (offset)</label>
+      <label><input id="flipJsonDepth" type="checkbox" checked> Đảo chiều sâu JSON Z (sửa trước/sau)</label>
+      <label><input id="fitMappedPoints" type="checkbox" checked> Fit JSON bằng mapped bone points</label>
+      <label><input id="snapMapped" type="checkbox"> Ép mapped JSON trùng bone VRM</label>
       <label><input id="flipJsonFacing" type="checkbox"> Xoay JSON 180° quanh Y (giữ shape)</label>
       <label><input id="yawMatchShoulders" type="checkbox"> Khớp hướng vai JSON↔VRM (chỉ yaw Y)</label>
     </section>
@@ -254,6 +268,18 @@ function initUi() {
     if (frames[currentFrameIndex]) setFrame(currentFrameIndex);
     updateVisibility();
   };
+  $('flipJsonDepth').onchange = (e) => {
+    flipJsonDepth = e.target.checked;
+    if (frames[currentFrameIndex]) setFrame(currentFrameIndex);
+  };
+  $('fitMappedPoints').onchange = (e) => {
+    fitMappedPoints = e.target.checked;
+    if (frames[currentFrameIndex]) setFrame(currentFrameIndex);
+  };
+  $('snapMapped').onchange = (e) => {
+    snapMappedLandmarks = e.target.checked;
+    if (frames[currentFrameIndex]) setFrame(currentFrameIndex);
+  };
   $('flipJsonFacing').onchange = () => {
     if (frames[currentFrameIndex]) setFrame(currentFrameIndex);
   };
@@ -285,6 +311,7 @@ async function loadVrmPath(path) {
   boneHelper = new THREE.SkeletonHelper(vrm.scene);
   boneHelper.material.color.set(0x38bdf8);
   scene.add(boneHelper);
+  calibrateRestDirections();
   createBoneNodesAndLabels();
   setStatus('VRM loaded');
   updateVisibility();
@@ -398,7 +425,7 @@ function hasWorld(l) {
 }
 function toWorldPoint(l) {
   if (!l) return null;
-  if (hasWorld(l)) return new THREE.Vector3(l.wx, -l.wy, l.wz);
+  if (hasWorld(l)) return new THREE.Vector3(l.wx, -l.wy, flipJsonDepth ? -l.wz : l.wz);
   return new THREE.Vector3((l.xNorm - 0.5) * 2, -(l.yNorm - 0.5) * 2, 0);
 }
 
@@ -528,18 +555,82 @@ function computeJsonToVrmAlign(frame) {
     yOffset = groundY - (minLocalY + vrmHip.y);
   }
 
-  return {
+  const align = {
     mpHip: mpHip.clone(),
     vrmHip: vrmHip.clone(),
     scale,
     rotation,
     yOffset,
+    extraOffset: new THREE.Vector3(),
   };
+  applyMappedPointFit(frame, align);
+  return align;
 }
 
 function mid3(a, b) {
   if (!a || !b) return null;
   return new THREE.Vector3().addVectors(a, b).multiplyScalar(0.5);
+}
+
+function applyMappedPointFit(frame, align) {
+  if (!fitMappedPoints || !vrm?.humanoid || !frame?.landmarks?.length || !align) return;
+  const pairs = [];
+  const usedLandmarks = new Set();
+  for (const [boneName, lmName] of Object.entries(mapping)) {
+    if (!lmName || usedLandmarks.has(lmName)) continue;
+    const idx = LANDMARK[lmName];
+    const bone = vrm.humanoid.getNormalizedBoneNode(boneName);
+    const raw = idx != null ? toWorldPoint(lm(frame, idx)) : null;
+    if (!bone || !raw) continue;
+    usedLandmarks.add(lmName);
+    const source = raw.clone().sub(align.mpHip);
+    if (align.rotation) source.applyQuaternion(align.rotation);
+    const target = bone.getWorldPosition(new THREE.Vector3()).sub(align.vrmHip);
+    pairs.push({ source, target });
+  }
+  if (pairs.length < 3) return;
+
+  const sourceCenter = new THREE.Vector3();
+  const targetCenter = new THREE.Vector3();
+  for (const pair of pairs) {
+    sourceCenter.add(pair.source);
+    targetCenter.add(pair.target);
+  }
+  sourceCenter.multiplyScalar(1 / pairs.length);
+  targetCenter.multiplyScalar(1 / pairs.length);
+
+  let sourceRms = 0;
+  let targetRms = 0;
+  for (const pair of pairs) {
+    sourceRms += pair.source.distanceToSquared(sourceCenter);
+    targetRms += pair.target.distanceToSquared(targetCenter);
+  }
+  sourceRms = Math.sqrt(sourceRms / pairs.length);
+  targetRms = Math.sqrt(targetRms / pairs.length);
+  if (sourceRms > 1e-5 && targetRms > 1e-5) {
+    const mappedScale = THREE.MathUtils.clamp(targetRms / (sourceRms * align.scale), 0.35, 2.5);
+    align.scale *= mappedScale;
+  }
+
+  const residual = new THREE.Vector3();
+  for (const pair of pairs) {
+    const fitted = pair.source.clone().multiplyScalar(align.scale);
+    fitted.y += align.yOffset || 0;
+    residual.add(pair.target.clone().sub(fitted));
+  }
+  align.extraOffset.copy(residual.multiplyScalar(1 / pairs.length));
+}
+
+function mappedBoneTargets() {
+  const targets = new Map();
+  if (!snapMappedLandmarks || !vrm?.humanoid) return targets;
+  for (const [boneName, lmName] of Object.entries(mapping)) {
+    if (!lmName || targets.has(lmName)) continue;
+    const bone = vrm.humanoid.getNormalizedBoneNode(boneName);
+    if (!bone) continue;
+    targets.set(lmName, bone.getWorldPosition(new THREE.Vector3()));
+  }
+  return targets;
 }
 
 /** Map one landmark into VRM-aligned world space (preserves JSON shape). */
@@ -549,6 +640,7 @@ function toVrmBodyPoint(l, align) {
   const local = raw.clone().sub(align.mpHip).multiplyScalar(align.scale);
   if (align.rotation) local.applyQuaternion(align.rotation);
   local.y += align.yOffset || 0;
+  if (align.extraOffset) local.add(align.extraOffset);
   return local.add(align.vrmHip);
 }
 
@@ -599,6 +691,49 @@ function updateBoneNodePositions() {
   }
 }
 
+const REST_CHILD_BONE = {
+  leftUpperArm: 'leftLowerArm',
+  leftLowerArm: 'leftHand',
+  rightUpperArm: 'rightLowerArm',
+  rightLowerArm: 'rightHand',
+  leftUpperLeg: 'leftLowerLeg',
+  leftLowerLeg: 'leftFoot',
+  rightUpperLeg: 'rightLowerLeg',
+  rightLowerLeg: 'rightFoot',
+  leftFoot: 'leftToes',
+  rightFoot: 'rightToes',
+};
+
+function calibrateRestDirections() {
+  calibratedRestDirs.clear();
+  if (!vrm?.humanoid) return;
+  vrm.scene.updateMatrixWorld(true);
+  for (const [boneName, childName] of Object.entries(REST_CHILD_BONE)) {
+    const bone = vrm.humanoid.getNormalizedBoneNode(boneName);
+    const child = vrm.humanoid.getNormalizedBoneNode(childName);
+    if (!bone?.parent || !child) continue;
+    const from = bone.getWorldPosition(new THREE.Vector3());
+    const to = child.getWorldPosition(new THREE.Vector3());
+    const dir = to.sub(from);
+    if (dir.lengthSq() < 1e-8) continue;
+    bone.parent.getWorldQuaternion(_parentQ);
+    dir.applyQuaternion(_parentQ.clone().invert()).normalize();
+    calibratedRestDirs.set(boneName, dir.clone());
+  }
+}
+
+function restDirForBone(boneName, planar) {
+  const calibrated = calibratedRestDirs.get(boneName);
+  const fallback = BONE_REST_DIR[boneName] || new THREE.Vector3(0, -1, 0);
+  const rest = (calibrated || fallback).clone().normalize();
+  if (planar) {
+    rest.z = 0;
+    if (rest.lengthSq() < 1e-8) rest.copy(fallback).normalize();
+    else rest.normalize();
+  }
+  return rest;
+}
+
 function clearGroupMeshes(group) {
   while (group.children.length) {
     const c = group.children.pop();
@@ -622,6 +757,7 @@ function drawPose(frame) {
   // ── A) Landmarks ON VRM body (pink dots + yellow stick figure) ──
   if (landmarksOnVrm && align) {
     const ptsOn = new Map();
+    const snapTargets = mappedBoneTargets();
     const lineMat = new THREE.LineBasicMaterial({
       color: 0xff6b8a,
       transparent: true,
@@ -630,7 +766,7 @@ function drawPose(frame) {
     });
     for (const l of frame.landmarks || []) {
       if (l.index < 11 && !showFace) continue;
-      const p = toVrmBodyPoint(l, align);
+      const p = snapTargets.get(l.name)?.clone() || toVrmBodyPoint(l, align);
       if (!p) continue;
       ptsOn.set(l.index, p.clone());
 
@@ -920,8 +1056,8 @@ function updateVisibility() {
 }
 
 /**
- * Single retarget path per frame — never Kalidokit + chains together.
- * - world landmarks → Kalidokit only
+ * Hybrid retarget path per frame.
+ * - world landmarks → Kalidokit base + mapping-driven direction correction
  * - else → planar direction chains only (mapping-driven)
  */
 function applyRetarget(frame) {
@@ -930,8 +1066,9 @@ function applyRetarget(frame) {
   const useWorld = worldCount >= 10;
   if (useWorld) {
     const ok = applyKalidokit(frame);
-    retargetMode = ok ? 'kalidokit-only' : 'kalidokit-fail→planar';
-    if (!ok) applyDirectionChains(frame, true);
+    retargetMode = ok ? 'kalidokit+direction-correction' : 'kalidokit-fail→planar';
+    if (ok) applyDirectionChains(frame, false, 0.45);
+    else applyDirectionChains(frame, true);
   } else {
     retargetMode = 'planar-chain-only';
     applyDirectionChains(frame, true);
@@ -984,7 +1121,7 @@ function applyKalidokit(frame) {
       const bone = vrm.humanoid.getNormalizedBoneNode('hips');
       if (bone) {
         const e = new THREE.Euler(hipsRot.x, hipsRot.y, hipsRot.z, 'XYZ');
-        bone.quaternion.slerp(new THREE.Quaternion().setFromEuler(e), 0.55);
+        bone.quaternion.slerp(new THREE.Quaternion().setFromEuler(e), currentRetargetAlpha(0.55));
         bone.updateMatrixWorld(true);
       }
     }
@@ -993,14 +1130,14 @@ function applyKalidokit(frame) {
       if (bone) {
         const s = rig.Spine;
         const e = new THREE.Euler(s.x * 0.85, (s.y || 0) * 0.4, (s.z || 0) * 0.85, 'XYZ');
-        bone.quaternion.slerp(new THREE.Quaternion().setFromEuler(e), 0.5);
+        bone.quaternion.slerp(new THREE.Quaternion().setFromEuler(e), currentRetargetAlpha());
         bone.updateMatrixWorld(true);
       }
       const chest = vrm.humanoid.getNormalizedBoneNode('chest');
       if (chest) {
         const s = rig.Spine;
         const e = new THREE.Euler(s.x * 0.45, (s.y || 0) * 0.2, (s.z || 0) * 0.45, 'XYZ');
-        chest.quaternion.slerp(new THREE.Quaternion().setFromEuler(e), 0.5);
+        chest.quaternion.slerp(new THREE.Quaternion().setFromEuler(e), currentRetargetAlpha());
         chest.updateMatrixWorld(true);
       }
     }
@@ -1011,7 +1148,7 @@ function applyKalidokit(frame) {
       const b = vrm.humanoid.getNormalizedBoneNode(bn);
       if (!r || !b || r.x == null) continue;
       const e = new THREE.Euler(r.x || 0, r.y || 0, r.z || 0, 'XYZ');
-      b.quaternion.slerp(new THREE.Quaternion().setFromEuler(e), 0.5);
+      b.quaternion.slerp(new THREE.Quaternion().setFromEuler(e), currentRetargetAlpha());
       b.updateMatrixWorld(true);
     }
     return true;
@@ -1044,7 +1181,7 @@ const BONE_REST_DIR = {
  * segment = mapping[bone] → mapping[nextBone] (or toes).
  * planar=true forces z=0 (anti-twist without world).
  */
-function applyDirectionChains(frame, planar) {
+function applyDirectionChains(frame, planar, correctionScale = 1) {
   // [bone, fromLmKey, toLmKey] using mapping table for lm names
   const segs = [
     ['leftUpperArm', mapping.leftUpperArm, mapping.leftLowerArm],
@@ -1055,21 +1192,21 @@ function applyDirectionChains(frame, planar) {
     ['rightHand', mapping.rightHand, mapping.rightIndexProximal || mapping.rightThumbProximal],
     ['leftUpperLeg', mapping.leftUpperLeg, mapping.leftLowerLeg],
     ['leftLowerLeg', mapping.leftLowerLeg, mapping.leftFoot],
-    ['leftFoot', mapping.leftFoot, mapping.leftToes],
+    ['leftFoot', 'leftHeel', mapping.leftToes || 'leftFootIndex'],
     ['leftToes', mapping.leftFoot, mapping.leftToes],
     ['rightUpperLeg', mapping.rightUpperLeg, mapping.rightLowerLeg],
     ['rightLowerLeg', mapping.rightLowerLeg, mapping.rightFoot],
-    ['rightFoot', mapping.rightFoot, mapping.rightToes],
+    ['rightFoot', 'rightHeel', mapping.rightToes || 'rightFootIndex'],
     ['rightToes', mapping.rightFoot, mapping.rightToes],
   ];
 
   for (const [boneName, fromName, toName] of segs) {
     if (!fromName || !toName || fromName === toName) continue;
-    applyBoneFromTo(boneName, fromName, toName, frame, planar);
+    applyBoneFromTo(boneName, fromName, toName, frame, planar, correctionScale);
   }
 }
 
-function applyBoneFromTo(boneName, fromLmName, toLmName, frame, planar) {
+function applyBoneFromTo(boneName, fromLmName, toLmName, frame, planar, correctionScale = 1) {
   const bone = vrm.humanoid.getNormalizedBoneNode(boneName);
   if (!bone?.parent) return;
   const fromL = lm(frame, LANDMARK[fromLmName]);
@@ -1089,13 +1226,7 @@ function applyBoneFromTo(boneName, fromLmName, toLmName, frame, planar) {
   if (_dir.lengthSq() < 1e-8) return;
   _dir.normalize();
 
-  const rest = BONE_REST_DIR[boneName] || new THREE.Vector3(0, -1, 0);
-  _rest.copy(rest).normalize();
-  if (planar) {
-    _rest.z = 0;
-    if (_rest.lengthSq() < 1e-8) _rest.set(0, -1, 0);
-    else _rest.normalize();
-  }
+  _rest.copy(restDirForBone(boneName, planar));
 
   const dot = THREE.MathUtils.clamp(_rest.dot(_dir), -1, 1);
   if (dot > 0.9995) return;
@@ -1104,7 +1235,7 @@ function applyBoneFromTo(boneName, fromLmName, toLmName, frame, planar) {
   } else {
     _desiredQ.setFromUnitVectors(_rest, _dir);
   }
-  bone.quaternion.slerp(_desiredQ, 0.5);
+  bone.quaternion.slerp(_desiredQ, currentRetargetAlpha(0.5 * correctionScale));
   bone.updateMatrixWorld(true);
 }
 
