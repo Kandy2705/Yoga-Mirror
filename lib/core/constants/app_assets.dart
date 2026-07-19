@@ -9,7 +9,7 @@ class AppAssets {
 
   /// Default guide motion (chunked meta).
   static const String defaultPoseMeta =
-      'assets/poses/mediapipe_video_3/meta.json';
+      'assets/poses/sapiens2_to_mediapipe_video_3_with_z/meta.json';
 
   /// Other chunked poses (optional switch).
   static const String mediapipeVideo3Meta =
@@ -46,7 +46,7 @@ class AppAssets {
   /// Alias — default runtime path is chunked meta.
   static const String defaultPoseJson = defaultPoseMeta;
 
-  static const String exerciseDisplayName = 'MediaPipe Video 3';
+  static const String exerciseDisplayName = 'Sapiens2 Video 3 With Z';
 
   /// Chunk size khi gửi VRM base64 sang WebView (ký tự).
   /// Larger = fewer bridge round-trips (main cost on iOS).

@@ -7,7 +7,7 @@ import * as Kalidokit from 'kalidokit';
 
 const APP_ASSET_PREFIX = '/assets';
 const DEFAULT_VRM_PATH = `${APP_ASSET_PREFIX}/models/yoga_avatar.vrm`;
-const DEFAULT_META_PATH = `${APP_ASSET_PREFIX}/poses/mediapipe_video_3/meta.json`;
+const DEFAULT_META_PATH = `${APP_ASSET_PREFIX}/poses/sapiens2_to_mediapipe_video_3_with_z/meta.json`;
 
 const LANDMARK_NAMES = [
   'nose', 'leftEyeInner', 'leftEye', 'leftEyeOuter', 'rightEyeInner', 'rightEye', 'rightEyeOuter',
@@ -149,7 +149,7 @@ document.querySelector('#app').innerHTML = `
       <button id="loadDefault">Load default assets</button>
       <label>VRM <input id="vrmFile" type="file" accept=".vrm"></label>
       <label>Pose JSON/meta/chunk <input id="poseFile" type="file" accept=".json" multiple></label>
-      <input id="assetPath" value="assets/poses/mediapipe_video_3/meta.json">
+      <input id="assetPath" value="assets/poses/sapiens2_to_mediapipe_video_3_with_z/meta.json">
       <button id="loadPath">Load asset path</button>
     </section>
     <section class="card">
