@@ -94,6 +94,7 @@ let fitMappedPoints = true; // scale/translate JSON by mapped bone pairs
 let snapMappedLandmarks = false; // force mapped JSON dots to VRM bone positions for checking
 let flipJsonDepth = true; // MediaPipe world Z front/back can be opposite of VRM
 let hoverInfo = null;
+const calibratedRestDirs = new Map();
 const playbackRetargetAlpha = 0.5;
 const debugRetargetAlpha = 1.0;
 
@@ -310,6 +311,7 @@ async function loadVrmPath(path) {
   boneHelper = new THREE.SkeletonHelper(vrm.scene);
   boneHelper.material.color.set(0x38bdf8);
   scene.add(boneHelper);
+  calibrateRestDirections();
   createBoneNodesAndLabels();
   setStatus('VRM loaded');
   updateVisibility();
@@ -687,6 +689,49 @@ function updateBoneNodePositions() {
     const lab = boneLabelGroup.children.find((c) => c.userData?.name === n.name);
     if (lab) lab.position.copy(tmpV);
   }
+}
+
+const REST_CHILD_BONE = {
+  leftUpperArm: 'leftLowerArm',
+  leftLowerArm: 'leftHand',
+  rightUpperArm: 'rightLowerArm',
+  rightLowerArm: 'rightHand',
+  leftUpperLeg: 'leftLowerLeg',
+  leftLowerLeg: 'leftFoot',
+  rightUpperLeg: 'rightLowerLeg',
+  rightLowerLeg: 'rightFoot',
+  leftFoot: 'leftToes',
+  rightFoot: 'rightToes',
+};
+
+function calibrateRestDirections() {
+  calibratedRestDirs.clear();
+  if (!vrm?.humanoid) return;
+  vrm.scene.updateMatrixWorld(true);
+  for (const [boneName, childName] of Object.entries(REST_CHILD_BONE)) {
+    const bone = vrm.humanoid.getNormalizedBoneNode(boneName);
+    const child = vrm.humanoid.getNormalizedBoneNode(childName);
+    if (!bone?.parent || !child) continue;
+    const from = bone.getWorldPosition(new THREE.Vector3());
+    const to = child.getWorldPosition(new THREE.Vector3());
+    const dir = to.sub(from);
+    if (dir.lengthSq() < 1e-8) continue;
+    bone.parent.getWorldQuaternion(_parentQ);
+    dir.applyQuaternion(_parentQ.clone().invert()).normalize();
+    calibratedRestDirs.set(boneName, dir.clone());
+  }
+}
+
+function restDirForBone(boneName, planar) {
+  const calibrated = calibratedRestDirs.get(boneName);
+  const fallback = BONE_REST_DIR[boneName] || new THREE.Vector3(0, -1, 0);
+  const rest = (calibrated || fallback).clone().normalize();
+  if (planar) {
+    rest.z = 0;
+    if (rest.lengthSq() < 1e-8) rest.copy(fallback).normalize();
+    else rest.normalize();
+  }
+  return rest;
 }
 
 function clearGroupMeshes(group) {
@@ -1147,11 +1192,11 @@ function applyDirectionChains(frame, planar, correctionScale = 1) {
     ['rightHand', mapping.rightHand, mapping.rightIndexProximal || mapping.rightThumbProximal],
     ['leftUpperLeg', mapping.leftUpperLeg, mapping.leftLowerLeg],
     ['leftLowerLeg', mapping.leftLowerLeg, mapping.leftFoot],
-    ['leftFoot', mapping.leftFoot, mapping.leftToes],
+    ['leftFoot', 'leftHeel', mapping.leftToes || 'leftFootIndex'],
     ['leftToes', mapping.leftFoot, mapping.leftToes],
     ['rightUpperLeg', mapping.rightUpperLeg, mapping.rightLowerLeg],
     ['rightLowerLeg', mapping.rightLowerLeg, mapping.rightFoot],
-    ['rightFoot', mapping.rightFoot, mapping.rightToes],
+    ['rightFoot', 'rightHeel', mapping.rightToes || 'rightFootIndex'],
     ['rightToes', mapping.rightFoot, mapping.rightToes],
   ];
 
@@ -1181,13 +1226,7 @@ function applyBoneFromTo(boneName, fromLmName, toLmName, frame, planar, correcti
   if (_dir.lengthSq() < 1e-8) return;
   _dir.normalize();
 
-  const rest = BONE_REST_DIR[boneName] || new THREE.Vector3(0, -1, 0);
-  _rest.copy(rest).normalize();
-  if (planar) {
-    _rest.z = 0;
-    if (_rest.lengthSq() < 1e-8) _rest.set(0, -1, 0);
-    else _rest.normalize();
-  }
+  _rest.copy(restDirForBone(boneName, planar));
 
   const dot = THREE.MathUtils.clamp(_rest.dot(_dir), -1, 1);
   if (dot > 0.9995) return;
