@@ -28,6 +28,7 @@ let guideModelZOffset = 0.0;
 let guideModelYaw = Math.PI;   
 
 let poseBodyYaw = 0;
+let poseBodyYawInitialized = false;
 let lastRetargetMode = 'idle';
 
 
@@ -84,6 +85,7 @@ let boneHelper = null;
 let debugRecenterOffset = new THREE.Vector3();
 let debugScaleFactor = 1;
 const debugGroup = new THREE.Group();
+const restPoseQuats = new Map();
 
 let idLabelMode = 'off';
 
@@ -317,6 +319,8 @@ async function loadVrmFromBase64Internal(base64) {
 
     vrm = gltf.userData.vrm;
     if (!vrm) throw new Error('File is not a valid VRM (userData.vrm missing)');
+    poseBodyYaw = 0;
+    poseBodyYawInitialized = false;
     step = 'vrm_parsed';
     reportStep(step);
     console.log('[YogaVRM] VRM loaded');
@@ -332,6 +336,8 @@ async function loadVrmFromBase64Internal(base64) {
 
     step = 'normalize';
     normalizeVrmModel(vrm);
+
+    captureRestPose();
 
     step = 'opacity';
     if (typeof window.setGuideOpacity === 'function') {
@@ -752,6 +758,108 @@ function applyBoneDirectionChainByName(boneName, from, to, defaultDir, alpha) {
   applyBoneDirectionChain(bone, from, to, defaultDir, alpha);
 }
 
+function captureRestPose() {
+  restPoseQuats.clear();
+  if (!vrm?.humanoid) return;
+  const names = [
+    'hips', 'spine', 'chest', 'upperChest', 'neck', 'head',
+    'leftUpperArm', 'leftLowerArm', 'leftHand',
+    'rightUpperArm', 'rightLowerArm', 'rightHand',
+    'leftUpperLeg', 'leftLowerLeg', 'leftFoot', 'leftToes',
+    'rightUpperLeg', 'rightLowerLeg', 'rightFoot', 'rightToes',
+    'leftThumbProximal', 'leftIndexProximal', 'leftIndexIntermediate', 'leftIndexDistal',
+    'rightThumbProximal', 'rightIndexProximal', 'rightIndexIntermediate', 'rightIndexDistal',
+  ];
+  for (const name of names) {
+    const bone = vrm.humanoid.getNormalizedBoneNode(name);
+    if (bone) restPoseQuats.set(name, bone.quaternion.clone());
+  }
+}
+
+function resetVrmPoseToRest() {
+  if (!vrm?.humanoid) return;
+  for (const [name, quat] of restPoseQuats.entries()) {
+    const bone = vrm.humanoid.getNormalizedBoneNode(name);
+    if (bone) bone.quaternion.copy(quat);
+  }
+  vrm.scene.updateMatrixWorld(true);
+}
+
+function getLandmarkPointByName(frame, landmarkName) {
+  const idx = Object.prototype.hasOwnProperty.call(LANDMARK, landmarkName) ? LANDMARK[landmarkName] : null;
+  return idx != null ? getLandmarkPoint(frame, idx) : null;
+}
+
+function footGuideLandmarksForBone(footBoneName) {
+  const ankleName = BONE_LANDMARK_MAP[footBoneName];
+  if (ankleName?.startsWith('right')) return { heel: 'rightHeel', toe: 'rightFootIndex' };
+  if (ankleName?.startsWith('left')) return { heel: 'leftHeel', toe: 'leftFootIndex' };
+  return footBoneName.startsWith('right')
+    ? { heel: 'rightHeel', toe: 'rightFootIndex' }
+    : { heel: 'leftHeel', toe: 'leftFootIndex' };
+}
+
+function shortestAngleDelta(from, to) {
+  return Math.atan2(Math.sin(to - from), Math.cos(to - from));
+}
+
+function computeJsonBodyYaw(frame) {
+  const lHip = getLandmarkPoint(frame, LANDMARK.leftHip);
+  const rHip = getLandmarkPoint(frame, LANDMARK.rightHip);
+  const lSh = getLandmarkPoint(frame, LANDMARK.leftShoulder);
+  const rSh = getLandmarkPoint(frame, LANDMARK.rightShoulder);
+  const hipMid = midpoint(lHip, rHip);
+  const shMid = midpoint(lSh, rSh);
+  if (!hipMid || !shMid) return null;
+
+  const right = new THREE.Vector3();
+  let rightCount = 0;
+  if (lHip && rHip) { right.add(new THREE.Vector3().subVectors(rHip, lHip)); rightCount++; }
+  if (lSh && rSh) { right.add(new THREE.Vector3().subVectors(rSh, lSh)); rightCount++; }
+  if (!rightCount) return null;
+  right.multiplyScalar(1 / rightCount);
+
+  const up = new THREE.Vector3().subVectors(shMid, hipMid);
+  if (right.lengthSq() < 1e-8 || up.lengthSq() < 1e-8) return null;
+
+  const forward = new THREE.Vector3().crossVectors(right, up);
+  forward.y = 0;
+
+  const lHeel = getLandmarkPoint(frame, LANDMARK.leftHeel);
+  const lToe = getLandmarkPoint(frame, LANDMARK.leftFootIndex);
+  const rHeel = getLandmarkPoint(frame, LANDMARK.rightHeel);
+  const rToe = getLandmarkPoint(frame, LANDMARK.rightFootIndex);
+  const footForward = new THREE.Vector3();
+  let footCount = 0;
+  if (lHeel && lToe) { footForward.add(new THREE.Vector3().subVectors(lToe, lHeel)); footCount++; }
+  if (rHeel && rToe) { footForward.add(new THREE.Vector3().subVectors(rToe, rHeel)); footCount++; }
+  footForward.y = 0;
+  if (footCount && footForward.lengthSq() > 1e-8) {
+    footForward.normalize();
+    if (forward.lengthSq() < 1e-8 || Math.abs(forward.clone().normalize().dot(footForward)) < 0.35) {
+      forward.copy(footForward);
+    }
+  }
+
+  if (forward.lengthSq() < 1e-8) return null;
+  forward.normalize();
+  return Math.atan2(forward.x, forward.z);
+}
+
+function applyJsonBodyYaw(frame) {
+  const targetYaw = computeJsonBodyYaw(frame);
+  if (targetYaw == null) return;
+  if (!poseBodyYawInitialized) {
+    poseBodyYaw = targetYaw;
+    poseBodyYawInitialized = true;
+  } else {
+    const delta = shortestAngleDelta(poseBodyYaw, targetYaw);
+    if (Math.abs(delta) > Math.PI * 0.55) return;
+    const maxStep = isPlaying ? 0.08 : 0.18;
+    poseBodyYaw += THREE.MathUtils.clamp(delta * currentRetargetAlpha(), -maxStep, maxStep);
+  }
+}
+
 
 
 function applyTorso(frame) {
@@ -829,6 +937,9 @@ function applyLeg(frame, side) {
   const k = getMappedLandmarkPoint(frame, lower);
   const a = getMappedLandmarkPoint(frame, foot);
   const t = getMappedLandmarkPoint(frame, toes);
+  const footGuide = footGuideLandmarksForBone(foot);
+  const heel = getLandmarkPointByName(frame, footGuide.heel);
+  const toe = getLandmarkPointByName(frame, footGuide.toe);
 
   if (h && k) {
     applyBoneDirectionChainByName(upper, h, k, down);
@@ -838,7 +949,10 @@ function applyLeg(frame, side) {
     applyBoneDirectionChainByName(lower, k, a, down);
     vrm.scene.updateMatrixWorld(true);
   }
-  if (a && (k || h)) {
+  if (heel && toe) {
+    applyBoneDirectionChainByName(foot, heel, toe, new THREE.Vector3(0, 0, -1), 0.65);
+    vrm.scene.updateMatrixWorld(true);
+  } else if (a && (k || h)) {
     applyBoneDirectionChainByName(foot, k || h, a, down, 0.5);
     vrm.scene.updateMatrixWorld(true);
   }
@@ -887,12 +1001,14 @@ function computePlanarBodyYaw(frame) {
 function applyCustomPose(frame) {
   if (!vrm) return;
   if (frame.personDetected === false) return;
-  lastRetargetMode = 'custom_planar';
-  poseBodyYaw = THREE.MathUtils.lerp(poseBodyYaw, computePlanarBodyYaw(frame), 0.2);
+  lastRetargetMode = 'ik-solver';
+  resetVrmPoseToRest();
+  applyJsonBodyYaw(frame);
+  applyGuideRootTransform();
   if (retargetParts.torso) applyTorso(frame);
   if (retargetParts.arms) { applyArm(frame, 'left'); applyArm(frame, 'right'); }
   if (retargetParts.legs) { applyLeg(frame, 'left'); applyLeg(frame, 'right'); }
-  applyGuideRootTransform();
+  if (vrm.humanoid) vrm.humanoid.update(0);
 }
 
 
@@ -1106,28 +1222,9 @@ function applyPoseToVrm(frame) {
   if (!vrm || !enableRetarget) return;
   if (!isValidFrame(frame)) return;
 
-  const allPartsEnabled = retargetParts.torso && retargetParts.arms && retargetParts.legs;
-  if (frameHasWorldLandmarks(frame) && Kalidokit && allPartsEnabled) {
-    const { poseLandmarkArray, poseWorld3DArray } = frameToKalidoKitInputs(frame);
-    const riggedPose = Kalidokit.Pose.solve(poseWorld3DArray, poseLandmarkArray, {
-      runtime: 'mediapipe',
-      video: null,
-      enableLegs: true,
-    });
-    if (riggedPose?.Hips || riggedPose?.RightUpperArm) {
-      
-      
-      poseBodyYaw = 0;
-      lastRetargetMode = 'kalidokit+direction-correction';
-      applyKalidoPoseToVrm(riggedPose);
-      applyKalidoTorsoLeanOverride(frame);
-      applyKalidoPlanarArmOverride(frame);
-      applyKalidoPlanarLegOverride(frame);
-      updateDepthHud(frame);
-      return;
-    }
-  }
-
+  // Keep mobile/WebView behavior aligned with Mapping Studio's default IK solver.
+  // Kalidokit remains in the bundle for diagnostics, but the guide model now uses
+  // the same mapping-driven IK-style path users validate in the web studio.
   applyCustomPose(frame);
   updateDepthHud(frame);
 }

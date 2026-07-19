@@ -1,10 +1,4 @@
 (() => {
-  var __defProp = Object.defineProperty;
-  var __export = (target, all) => {
-    for (var name in all)
-      __defProp(target, name, { get: all[name], enumerable: true });
-  };
-
   // node_modules/three/build/three.module.js
   var REVISION = "160";
   var CullFaceNone = 0;
@@ -29552,23 +29546,7 @@
   VRMUtils.removeUnnecessaryVertices = removeUnnecessaryVertices;
   VRMUtils.rotateVRM0 = rotateVRM0;
 
-  // node_modules/kalidokit/dist/index.js
-  var dist_exports = {};
-  __export(dist_exports, {
-    Face: () => FaceSolver,
-    Hand: () => HandSolver,
-    Pose: () => PoseSolver,
-    Utils: () => helpers_exports,
-    Vector: () => Vector
-  });
-
   // node_modules/kalidokit/dist/utils/helpers.js
-  var helpers_exports = {};
-  __export(helpers_exports, {
-    RestingDefault: () => RestingDefault,
-    clamp: () => clamp2,
-    remap: () => remap
-  });
   var clamp2 = (val, min, max) => {
     return Math.max(Math.min(val, max), min);
   };
@@ -30601,89 +30579,6 @@
   PoseSolver.calcHips = calcHips;
   PoseSolver.calcLegs = calcLegs;
 
-  // node_modules/kalidokit/dist/HandSolver/index.js
-  var HandSolver = class {
-    /**
-     * Calculates finger and wrist as euler rotations
-     * @param {Array} lm : array of 3D hand vectors from tfjs or mediapipe
-     * @param {Side} side: left or right
-     */
-    static solve(lm, side = RIGHT) {
-      if (!lm) {
-        console.error("Need Hand Landmarks");
-        return;
-      }
-      const palm = [
-        new Vector(lm[0]),
-        new Vector(lm[side === RIGHT ? 17 : 5]),
-        new Vector(lm[side === RIGHT ? 5 : 17])
-      ];
-      const handRotation = Vector.rollPitchYaw(palm[0], palm[1], palm[2]);
-      handRotation.y = handRotation.z;
-      handRotation.y -= side === LEFT ? 0.4 : 0.4;
-      let hand = {};
-      hand[side + "Wrist"] = { x: handRotation.x, y: handRotation.y, z: handRotation.z };
-      hand[side + "RingProximal"] = { x: 0, y: 0, z: Vector.angleBetween3DCoords(lm[0], lm[13], lm[14]) };
-      hand[side + "RingIntermediate"] = { x: 0, y: 0, z: Vector.angleBetween3DCoords(lm[13], lm[14], lm[15]) };
-      hand[side + "RingDistal"] = { x: 0, y: 0, z: Vector.angleBetween3DCoords(lm[14], lm[15], lm[16]) };
-      hand[side + "IndexProximal"] = { x: 0, y: 0, z: Vector.angleBetween3DCoords(lm[0], lm[5], lm[6]) };
-      hand[side + "IndexIntermediate"] = { x: 0, y: 0, z: Vector.angleBetween3DCoords(lm[5], lm[6], lm[7]) };
-      hand[side + "IndexDistal"] = { x: 0, y: 0, z: Vector.angleBetween3DCoords(lm[6], lm[7], lm[8]) };
-      hand[side + "MiddleProximal"] = { x: 0, y: 0, z: Vector.angleBetween3DCoords(lm[0], lm[9], lm[10]) };
-      hand[side + "MiddleIntermediate"] = { x: 0, y: 0, z: Vector.angleBetween3DCoords(lm[9], lm[10], lm[11]) };
-      hand[side + "MiddleDistal"] = { x: 0, y: 0, z: Vector.angleBetween3DCoords(lm[10], lm[11], lm[12]) };
-      hand[side + "ThumbProximal"] = { x: 0, y: 0, z: Vector.angleBetween3DCoords(lm[0], lm[1], lm[2]) };
-      hand[side + "ThumbIntermediate"] = { x: 0, y: 0, z: Vector.angleBetween3DCoords(lm[1], lm[2], lm[3]) };
-      hand[side + "ThumbDistal"] = { x: 0, y: 0, z: Vector.angleBetween3DCoords(lm[2], lm[3], lm[4]) };
-      hand[side + "LittleProximal"] = { x: 0, y: 0, z: Vector.angleBetween3DCoords(lm[0], lm[17], lm[18]) };
-      hand[side + "LittleIntermediate"] = { x: 0, y: 0, z: Vector.angleBetween3DCoords(lm[17], lm[18], lm[19]) };
-      hand[side + "LittleDistal"] = { x: 0, y: 0, z: Vector.angleBetween3DCoords(lm[18], lm[19], lm[20]) };
-      hand = rigFingers(hand, side);
-      return hand;
-    }
-  };
-  var rigFingers = (hand, side = RIGHT) => {
-    const invert = side === RIGHT ? 1 : -1;
-    const digits = ["Ring", "Index", "Little", "Thumb", "Middle"];
-    const segments = ["Proximal", "Intermediate", "Distal"];
-    hand[side + "Wrist"].x = clamp2(hand[side + "Wrist"].x * 2 * invert, -0.3, 0.3);
-    hand[side + "Wrist"].y = clamp2(hand[side + "Wrist"].y * 2.3, side === RIGHT ? -1.2 : -0.6, side === RIGHT ? 0.6 : 1.6);
-    hand[side + "Wrist"].z = hand[side + "Wrist"].z * -2.3 * invert;
-    digits.forEach((e) => {
-      segments.forEach((j) => {
-        const trackedFinger = hand[side + e + j];
-        if (e === "Thumb") {
-          const dampener = {
-            x: j === "Proximal" ? 2.2 : j === "Intermediate" ? 0 : 0,
-            y: j === "Proximal" ? 2.2 : j === "Intermediate" ? 0.7 : 1,
-            z: j === "Proximal" ? 0.5 : j === "Intermediate" ? 0.5 : 0.5
-          };
-          const startPos = {
-            x: j === "Proximal" ? 1.2 : j === "Distal" ? -0.2 : -0.2,
-            y: j === "Proximal" ? 1.1 * invert : j === "Distal" ? 0.1 * invert : 0.1 * invert,
-            z: j === "Proximal" ? 0.2 * invert : j === "Distal" ? 0.2 * invert : 0.2 * invert
-          };
-          const newThumb = { x: 0, y: 0, z: 0 };
-          if (j === "Proximal") {
-            newThumb.z = clamp2(startPos.z + trackedFinger.z * -PI * dampener.z * invert, side === RIGHT ? -0.6 : -0.3, side === RIGHT ? 0.3 : 0.6);
-            newThumb.x = clamp2(startPos.x + trackedFinger.z * -PI * dampener.x, -0.6, 0.3);
-            newThumb.y = clamp2(startPos.y + trackedFinger.z * -PI * dampener.y * invert, side === RIGHT ? -1 : -0.3, side === RIGHT ? 0.3 : 1);
-          } else {
-            newThumb.z = clamp2(startPos.z + trackedFinger.z * -PI * dampener.z * invert, -2, 2);
-            newThumb.x = clamp2(startPos.x + trackedFinger.z * -PI * dampener.x, -2, 2);
-            newThumb.y = clamp2(startPos.y + trackedFinger.z * -PI * dampener.y * invert, -2, 2);
-          }
-          trackedFinger.x = newThumb.x;
-          trackedFinger.y = newThumb.y;
-          trackedFinger.z = newThumb.z;
-        } else {
-          trackedFinger.z = clamp2(trackedFinger.z * -PI * invert, side === RIGHT ? -PI : 0, side === RIGHT ? 0 : PI);
-        }
-      });
-    });
-    return hand;
-  };
-
   // node_modules/kalidokit/dist/FaceSolver/calcHead.js
   var createEulerPlane = (lm) => {
     const p1 = new Vector(lm[21]);
@@ -30955,6 +30850,7 @@
   var guideModelZOffset = 0;
   var guideModelYaw = Math.PI;
   var poseBodyYaw = 0;
+  var poseBodyYawInitialized = false;
   var lastRetargetMode = "idle";
   var guideModelPitch = 0;
   var baseNormalizeScale = 1;
@@ -30998,6 +30894,7 @@
   var debugRecenterOffset = new Vector3();
   var debugScaleFactor = 1;
   var debugGroup = new Group();
+  var restPoseQuats = /* @__PURE__ */ new Map();
   var idLabelMode = "off";
   var boneMapping = {};
   var mappingMode = false;
@@ -31224,6 +31121,8 @@
       }
       vrm = gltf.userData.vrm;
       if (!vrm) throw new Error("File is not a valid VRM (userData.vrm missing)");
+      poseBodyYaw = 0;
+      poseBodyYawInitialized = false;
       step = "vrm_parsed";
       reportStep(step);
       console.log("[YogaVRM] VRM loaded");
@@ -31236,6 +31135,7 @@
       scene.add(guideRoot);
       step = "normalize";
       normalizeVrmModel(vrm);
+      captureRestPose();
       step = "opacity";
       if (typeof window.setGuideOpacity === "function") {
         window.setGuideOpacity(guideOpacity);
@@ -31439,9 +31339,6 @@
     if (!frame?.landmarks) return 0;
     return frame.landmarks.reduce((count, lm) => count + (landmarkHasWorld(lm) ? 1 : 0), 0);
   }
-  function frameHasWorldLandmarks(frame) {
-    return frameWorldLandmarkCount(frame) >= 10;
-  }
   function toWorldPoint(lm) {
     if (!lm) return null;
     if (landmarkHasWorld(lm)) {
@@ -31611,6 +31508,127 @@
     if (!bone) return;
     applyBoneDirectionChain(bone, from, to, defaultDir, alpha);
   }
+  function captureRestPose() {
+    restPoseQuats.clear();
+    if (!vrm?.humanoid) return;
+    const names = [
+      "hips",
+      "spine",
+      "chest",
+      "upperChest",
+      "neck",
+      "head",
+      "leftUpperArm",
+      "leftLowerArm",
+      "leftHand",
+      "rightUpperArm",
+      "rightLowerArm",
+      "rightHand",
+      "leftUpperLeg",
+      "leftLowerLeg",
+      "leftFoot",
+      "leftToes",
+      "rightUpperLeg",
+      "rightLowerLeg",
+      "rightFoot",
+      "rightToes",
+      "leftThumbProximal",
+      "leftIndexProximal",
+      "leftIndexIntermediate",
+      "leftIndexDistal",
+      "rightThumbProximal",
+      "rightIndexProximal",
+      "rightIndexIntermediate",
+      "rightIndexDistal"
+    ];
+    for (const name of names) {
+      const bone = vrm.humanoid.getNormalizedBoneNode(name);
+      if (bone) restPoseQuats.set(name, bone.quaternion.clone());
+    }
+  }
+  function resetVrmPoseToRest() {
+    if (!vrm?.humanoid) return;
+    for (const [name, quat] of restPoseQuats.entries()) {
+      const bone = vrm.humanoid.getNormalizedBoneNode(name);
+      if (bone) bone.quaternion.copy(quat);
+    }
+    vrm.scene.updateMatrixWorld(true);
+  }
+  function getLandmarkPointByName(frame, landmarkName) {
+    const idx = Object.prototype.hasOwnProperty.call(LANDMARK, landmarkName) ? LANDMARK[landmarkName] : null;
+    return idx != null ? getLandmarkPoint(frame, idx) : null;
+  }
+  function footGuideLandmarksForBone(footBoneName) {
+    const ankleName = BONE_LANDMARK_MAP[footBoneName];
+    if (ankleName?.startsWith("right")) return { heel: "rightHeel", toe: "rightFootIndex" };
+    if (ankleName?.startsWith("left")) return { heel: "leftHeel", toe: "leftFootIndex" };
+    return footBoneName.startsWith("right") ? { heel: "rightHeel", toe: "rightFootIndex" } : { heel: "leftHeel", toe: "leftFootIndex" };
+  }
+  function shortestAngleDelta(from, to) {
+    return Math.atan2(Math.sin(to - from), Math.cos(to - from));
+  }
+  function computeJsonBodyYaw(frame) {
+    const lHip = getLandmarkPoint(frame, LANDMARK.leftHip);
+    const rHip = getLandmarkPoint(frame, LANDMARK.rightHip);
+    const lSh = getLandmarkPoint(frame, LANDMARK.leftShoulder);
+    const rSh = getLandmarkPoint(frame, LANDMARK.rightShoulder);
+    const hipMid = midpoint(lHip, rHip);
+    const shMid = midpoint(lSh, rSh);
+    if (!hipMid || !shMid) return null;
+    const right = new Vector3();
+    let rightCount = 0;
+    if (lHip && rHip) {
+      right.add(new Vector3().subVectors(rHip, lHip));
+      rightCount++;
+    }
+    if (lSh && rSh) {
+      right.add(new Vector3().subVectors(rSh, lSh));
+      rightCount++;
+    }
+    if (!rightCount) return null;
+    right.multiplyScalar(1 / rightCount);
+    const up = new Vector3().subVectors(shMid, hipMid);
+    if (right.lengthSq() < 1e-8 || up.lengthSq() < 1e-8) return null;
+    const forward = new Vector3().crossVectors(right, up);
+    forward.y = 0;
+    const lHeel = getLandmarkPoint(frame, LANDMARK.leftHeel);
+    const lToe = getLandmarkPoint(frame, LANDMARK.leftFootIndex);
+    const rHeel = getLandmarkPoint(frame, LANDMARK.rightHeel);
+    const rToe = getLandmarkPoint(frame, LANDMARK.rightFootIndex);
+    const footForward = new Vector3();
+    let footCount = 0;
+    if (lHeel && lToe) {
+      footForward.add(new Vector3().subVectors(lToe, lHeel));
+      footCount++;
+    }
+    if (rHeel && rToe) {
+      footForward.add(new Vector3().subVectors(rToe, rHeel));
+      footCount++;
+    }
+    footForward.y = 0;
+    if (footCount && footForward.lengthSq() > 1e-8) {
+      footForward.normalize();
+      if (forward.lengthSq() < 1e-8 || Math.abs(forward.clone().normalize().dot(footForward)) < 0.35) {
+        forward.copy(footForward);
+      }
+    }
+    if (forward.lengthSq() < 1e-8) return null;
+    forward.normalize();
+    return Math.atan2(forward.x, forward.z);
+  }
+  function applyJsonBodyYaw(frame) {
+    const targetYaw = computeJsonBodyYaw(frame);
+    if (targetYaw == null) return;
+    if (!poseBodyYawInitialized) {
+      poseBodyYaw = targetYaw;
+      poseBodyYawInitialized = true;
+    } else {
+      const delta = shortestAngleDelta(poseBodyYaw, targetYaw);
+      if (Math.abs(delta) > Math.PI * 0.55) return;
+      const maxStep = isPlaying ? 0.08 : 0.18;
+      poseBodyYaw += MathUtils.clamp(delta * currentRetargetAlpha(), -maxStep, maxStep);
+    }
+  }
   function applyTorso(frame) {
     const ls = getLandmarkPoint(frame, LANDMARK.leftShoulder);
     const rs = getLandmarkPoint(frame, LANDMARK.rightShoulder);
@@ -31671,6 +31689,9 @@
     const k = getMappedLandmarkPoint(frame, lower);
     const a = getMappedLandmarkPoint(frame, foot);
     const t = getMappedLandmarkPoint(frame, toes);
+    const footGuide = footGuideLandmarksForBone(foot);
+    const heel = getLandmarkPointByName(frame, footGuide.heel);
+    const toe = getLandmarkPointByName(frame, footGuide.toe);
     if (h && k) {
       applyBoneDirectionChainByName(upper, h, k, down);
       vrm.scene.updateMatrixWorld(true);
@@ -31679,7 +31700,10 @@
       applyBoneDirectionChainByName(lower, k, a, down);
       vrm.scene.updateMatrixWorld(true);
     }
-    if (a && (k || h)) {
+    if (heel && toe) {
+      applyBoneDirectionChainByName(foot, heel, toe, new Vector3(0, 0, -1), 0.65);
+      vrm.scene.updateMatrixWorld(true);
+    } else if (a && (k || h)) {
       applyBoneDirectionChainByName(foot, k || h, a, down, 0.5);
       vrm.scene.updateMatrixWorld(true);
     }
@@ -31688,38 +31712,13 @@
       vrm.scene.updateMatrixWorld(true);
     }
   }
-  function computePlanarBodyYaw(frame) {
-    const ls = getLandmark(frame, LANDMARK.leftShoulder);
-    const rs = getLandmark(frame, LANDMARK.rightShoulder);
-    const lh = getLandmark(frame, LANDMARK.leftHip);
-    const rh = getLandmark(frame, LANDMARK.rightHip);
-    if (!ls || !rs || !lh || !rh) return 0;
-    const shoulderWidth = Math.abs((ls.xNorm ?? 0.5) - (rs.xNorm ?? 0.5));
-    const hipWidth = Math.abs((lh.xNorm ?? 0.5) - (rh.xNorm ?? 0.5));
-    const bodyWidth = Math.max(shoulderWidth, hipWidth);
-    const normalWidth = 0.23;
-    const collapse = Math.max(0, Math.min(1, 1 - bodyWidth / normalWidth));
-    if (collapse < 0.12) return 0;
-    let yawSign = 0;
-    const leftDepth = [ls.z, lh.z].filter(hasFiniteNumber);
-    const rightDepth = [rs.z, rh.z].filter(hasFiniteNumber);
-    if (leftDepth.length && rightDepth.length) {
-      const avg = (arr) => arr.reduce((sum, value) => sum + value, 0) / arr.length;
-      const dz = avg(leftDepth) - avg(rightDepth);
-      if (Math.abs(dz) > 0.015) {
-        yawSign = dz < 0 ? -1 : 1;
-      }
-    }
-    if (yawSign === 0) {
-      yawSign = (ls.xNorm ?? 0) + (lh.xNorm ?? 0) > (rs.xNorm ?? 0) + (rh.xNorm ?? 0) ? 1 : -1;
-    }
-    return yawSign * collapse * (Math.PI * 0.48);
-  }
   function applyCustomPose(frame) {
     if (!vrm) return;
     if (frame.personDetected === false) return;
-    lastRetargetMode = "custom_planar";
-    poseBodyYaw = MathUtils.lerp(poseBodyYaw, computePlanarBodyYaw(frame), 0.2);
+    lastRetargetMode = "ik-solver";
+    resetVrmPoseToRest();
+    applyJsonBodyYaw(frame);
+    applyGuideRootTransform();
     if (retargetParts.torso) applyTorso(frame);
     if (retargetParts.arms) {
       applyArm(frame, "left");
@@ -31729,185 +31728,11 @@
       applyLeg(frame, "left");
       applyLeg(frame, "right");
     }
-    applyGuideRootTransform();
-  }
-  function frameToKalidoKitInputs(frame) {
-    const byIndex = new Array(33).fill(null);
-    frame.landmarks.forEach((lm) => {
-      byIndex[lm.index] = lm;
-    });
-    const poseLandmarkArray = byIndex.map(
-      (lm) => lm ? { x: lm.xNorm, y: lm.yNorm, z: lm.z ?? 0, visibility: lm.visibility ?? 0 } : { x: 0.5, y: 0.5, z: 0, visibility: 0 }
-    );
-    const poseWorld3DArray = byIndex.map(
-      (lm) => lm && landmarkHasWorld(lm) ? { x: lm.wx, y: lm.wy, z: lm.wz, visibility: lm.visibility ?? 0 } : { x: 0, y: 0, z: 0, visibility: 0 }
-    );
-    return { poseLandmarkArray, poseWorld3DArray };
-  }
-  var KALIDOKIT_DIRECT_MAP = {
-    Hips: "hips",
-    Spine: "spine",
-    Chest: "chest",
-    Neck: "neck",
-    Head: "head",
-    LeftUpperArm: "leftUpperArm",
-    RightUpperArm: "rightUpperArm",
-    LeftLowerArm: "leftLowerArm",
-    RightLowerArm: "rightLowerArm",
-    LeftHand: "leftHand",
-    RightHand: "rightHand",
-    LeftUpperLeg: "leftUpperLeg",
-    RightUpperLeg: "rightUpperLeg",
-    LeftLowerLeg: "leftLowerLeg",
-    RightLowerLeg: "rightLowerLeg"
-  };
-  function landmarkToPlanarPoint(lm) {
-    if (!lm || lm.xNorm == null || lm.yNorm == null) return null;
-    return new Vector3(
-      ((lm.xNorm ?? 0.5) - 0.5) * 1.5,
-      -((lm.yNorm ?? 0.5) - 0.5) * 1.5,
-      0
-    );
-  }
-  function midpointPlanar(a, b) {
-    const pa = landmarkToPlanarPoint(a);
-    const pb = landmarkToPlanarPoint(b);
-    return midpoint(pa, pb);
-  }
-  function applyKalidoTorsoLeanOverride(frame) {
-    if (!vrm || !retargetParts.torso) return;
-    const ls = getLandmark(frame, LANDMARK.leftShoulder);
-    const rs = getLandmark(frame, LANDMARK.rightShoulder);
-    const lh = getLandmark(frame, LANDMARK.leftHip);
-    const rh = getLandmark(frame, LANDMARK.rightHip);
-    const noseLm = getLandmark(frame, LANDMARK.nose);
-    if (!ls || !rs || !lh || !rh) return;
-    const shoulderCenter2d = midpointPlanar(ls, rs);
-    const hipCenter2d = midpointPlanar(lh, rh);
-    if (!shoulderCenter2d || !hipCenter2d) return;
-    const torsoDir = shoulderCenter2d.clone().sub(hipCenter2d);
-    if (torsoDir.lengthSq() < 1e-5) return;
-    torsoDir.normalize();
-    const leanAngle = Math.acos(MathUtils.clamp(torsoDir.dot(new Vector3(0, 1, 0)), -1, 1));
-    if (leanAngle < MathUtils.degToRad(10)) return;
-    const torsoAlpha = MathUtils.clamp((leanAngle - MathUtils.degToRad(8)) / MathUtils.degToRad(45), 0.15, 0.65);
-    applyBoneDirectionChainByName("hips", hipCenter2d, shoulderCenter2d, new Vector3(0, 1, 0), torsoAlpha * 0.45);
-    vrm.scene.updateMatrixWorld(true);
-    applyBoneDirectionChainByName("spine", hipCenter2d, shoulderCenter2d, new Vector3(0, 1, 0), torsoAlpha * 0.75);
-    vrm.scene.updateMatrixWorld(true);
-    applyBoneDirectionChainByName("chest", hipCenter2d, shoulderCenter2d, new Vector3(0, 1, 0), torsoAlpha);
-    vrm.scene.updateMatrixWorld(true);
-    if (noseLm) {
-      const nose2d = landmarkToPlanarPoint(noseLm);
-      if (!nose2d) return;
-      applyBoneDirectionChainByName("neck", shoulderCenter2d, nose2d, new Vector3(0, 1, 0), torsoAlpha * 0.55);
-      vrm.scene.updateMatrixWorld(true);
-      applyBoneDirectionChainByName("head", shoulderCenter2d, nose2d, new Vector3(0, 1, 0), torsoAlpha * 0.45);
-      vrm.scene.updateMatrixWorld(true);
-    }
-  }
-  function applyKalidoPlanarLegOverride(frame) {
-    if (!vrm || !retargetParts.legs) return;
-    const applySide = (side, hipIndex, kneeIndex, ankleIndex) => {
-      const hip = landmarkToPlanarPoint(getLandmark(frame, hipIndex));
-      const knee = landmarkToPlanarPoint(getLandmark(frame, kneeIndex));
-      const ankle = landmarkToPlanarPoint(getLandmark(frame, ankleIndex));
-      if (!hip || !knee || !ankle) return;
-      const prefix = side === "left" ? "left" : "right";
-      const hipToKnee = knee.clone().sub(hip);
-      const kneeToAnkle = ankle.clone().sub(knee);
-      if (hipToKnee.lengthSq() < 1e-5 || kneeToAnkle.lengthSq() < 1e-5) return;
-      const upperAlpha = 0.85;
-      const lowerAlpha = 0.9;
-      const down = new Vector3(0, -1, 0);
-      applyBoneDirectionChainByName(prefix + "UpperLeg", hip, knee, down, upperAlpha);
-      vrm.scene.updateMatrixWorld(true);
-      applyBoneDirectionChainByName(prefix + "LowerLeg", knee, ankle, down, lowerAlpha);
-      vrm.scene.updateMatrixWorld(true);
-      applyBoneDirectionChainByName(prefix + "Foot", knee, ankle, down, 0.45);
-      vrm.scene.updateMatrixWorld(true);
-    };
-    applySide("left", LANDMARK.leftHip, LANDMARK.leftKnee, LANDMARK.leftAnkle);
-    applySide("right", LANDMARK.rightHip, LANDMARK.rightKnee, LANDMARK.rightAnkle);
-  }
-  function applyKalidoPlanarArmOverride(frame) {
-    if (!vrm || !retargetParts.arms) return;
-    const applySide = (side, shoulderIndex, elbowIndex, wristIndex, indexIndex, thumbIndex) => {
-      const shoulder = landmarkToPlanarPoint(getLandmark(frame, shoulderIndex));
-      const elbow = landmarkToPlanarPoint(getLandmark(frame, elbowIndex));
-      const wrist = landmarkToPlanarPoint(getLandmark(frame, wristIndex));
-      const finger = landmarkToPlanarPoint(getLandmark(frame, indexIndex)) || landmarkToPlanarPoint(getLandmark(frame, thumbIndex));
-      if (!shoulder || !elbow || !wrist) return;
-      const prefix = side === "left" ? "left" : "right";
-      const restDir = side === "left" ? new Vector3(-1, 0, 0) : new Vector3(1, 0, 0);
-      const upperSegment = elbow.clone().sub(shoulder);
-      const lowerSegment = wrist.clone().sub(elbow);
-      if (upperSegment.lengthSq() < 1e-5 || lowerSegment.lengthSq() < 1e-5) return;
-      applyBoneDirectionChainByName(prefix + "UpperArm", shoulder, elbow, restDir, 0.75);
-      vrm.scene.updateMatrixWorld(true);
-      applyBoneDirectionChainByName(prefix + "LowerArm", elbow, wrist, restDir, 0.85);
-      vrm.scene.updateMatrixWorld(true);
-      if (finger) {
-        applyBoneDirectionChainByName(prefix + "Hand", wrist, finger, restDir, 0.45);
-        vrm.scene.updateMatrixWorld(true);
-      }
-    };
-    applySide("left", LANDMARK.leftShoulder, LANDMARK.leftElbow, LANDMARK.leftWrist, LANDMARK.leftIndex, LANDMARK.leftThumb);
-    applySide("right", LANDMARK.rightShoulder, LANDMARK.rightElbow, LANDMARK.rightWrist, LANDMARK.rightIndex, LANDMARK.rightThumb);
-  }
-  function applyKalidoPoseToVrm(riggedPose) {
-    if (!vrm || !riggedPose) return false;
-    const boneMap = KALIDOKIT_DIRECT_MAP;
-    for (const [kalidoKey, vrmBone] of Object.entries(boneMap)) {
-      const src = riggedPose[kalidoKey];
-      if (!src) continue;
-      const bone = vrm.humanoid.getNormalizedBoneNode(vrmBone);
-      if (!bone) continue;
-      const rotationData = src.rotation ?? src;
-      if (rotationData.x == null || rotationData.y == null || rotationData.z == null) continue;
-      let q;
-      if (rotationData.w != null) {
-        q = new Quaternion(
-          rotationData.x,
-          rotationData.y,
-          rotationData.z,
-          rotationData.w
-        ).normalize();
-      } else {
-        const euler = new Euler(rotationData.x, rotationData.y, rotationData.z, "XYZ");
-        q = new Quaternion().setFromEuler(euler);
-      }
-      if (kalidoKey === "Spine" || kalidoKey === "Chest") {
-        q.slerp(new Quaternion(), 0.35);
-      }
-      bone.quaternion.slerp(q, currentRetargetAlpha());
-      bone.updateMatrixWorld(true);
-    }
-    vrm.humanoid.update(0);
-    return true;
+    if (vrm.humanoid) vrm.humanoid.update(0);
   }
   function applyPoseToVrm(frame) {
     if (!vrm || !enableRetarget) return;
     if (!isValidFrame(frame)) return;
-    const allPartsEnabled = retargetParts.torso && retargetParts.arms && retargetParts.legs;
-    if (frameHasWorldLandmarks(frame) && dist_exports && allPartsEnabled) {
-      const { poseLandmarkArray, poseWorld3DArray } = frameToKalidoKitInputs(frame);
-      const riggedPose = PoseSolver.solve(poseWorld3DArray, poseLandmarkArray, {
-        runtime: "mediapipe",
-        video: null,
-        enableLegs: true
-      });
-      if (riggedPose?.Hips || riggedPose?.RightUpperArm) {
-        poseBodyYaw = 0;
-        lastRetargetMode = "kalidokit+direction-correction";
-        applyKalidoPoseToVrm(riggedPose);
-        applyKalidoTorsoLeanOverride(frame);
-        applyKalidoPlanarArmOverride(frame);
-        applyKalidoPlanarLegOverride(frame);
-        updateDepthHud(frame);
-        return;
-      }
-    }
     applyCustomPose(frame);
     updateDepthHud(frame);
   }
