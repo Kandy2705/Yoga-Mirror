@@ -7,7 +7,7 @@ import * as Kalidokit from 'kalidokit';
 
 const APP_ASSET_PREFIX = '/assets';
 const DEFAULT_VRM_PATH = `${APP_ASSET_PREFIX}/models/yoga_avatar.vrm`;
-const DEFAULT_META_PATH = `${APP_ASSET_PREFIX}/poses/sapiens2_to_mediapipe_video_3_with_z/meta.json`;
+const DEFAULT_META_PATH = `${APP_ASSET_PREFIX}/sapiens2_to_mediapipe_video_3_with_z.json`;
 
 const LANDMARK_NAMES = [
   'nose', 'leftEyeInner', 'leftEye', 'leftEyeOuter', 'rightEyeInner', 'rightEye', 'rightEyeOuter',
@@ -92,11 +92,12 @@ let showNameLabels = false;
 let landmarksOnVrm = false; // chấm JSON thẳng lên người VRM
 let showSideJson = true; // skeleton JSON bên cạnh (offset)
 let fitMappedPoints = true; // scale/translate JSON by mapped bone pairs
-let snapMappedLandmarks = false; // force mapped JSON dots to VRM bone positions for checking
+let snapMappedLandmarks = true; // force mapped JSON dots to VRM bone positions for checking
 let flipJsonDepth = false; // MediaPipe world Z front/back can be opposite of VRM
 let autoBodyYaw = true; // rotate the whole VRM toward JSON facing before limb correction
 let invertBodyYaw = false; // user override when MediaPipe handedness chooses the opposite facing normal
 let bodyYaw = 0;
+let bodyYawInitialized = false;
 let hoverInfo = null;
 const calibratedRestDirs = new Map();
 const restPoseQuats = new Map();
@@ -149,7 +150,7 @@ document.querySelector('#app').innerHTML = `
       <button id="loadDefault">Load default assets</button>
       <label>VRM <input id="vrmFile" type="file" accept=".vrm"></label>
       <label>Pose JSON/meta/chunk <input id="poseFile" type="file" accept=".json" multiple></label>
-      <input id="assetPath" value="assets/poses/sapiens2_to_mediapipe_video_3_with_z/meta.json">
+      <input id="assetPath" value="Assets/sapiens2_to_mediapipe_video_3_with_z.json">
       <button id="loadPath">Load asset path</button>
     </section>
     <section class="card">
@@ -166,7 +167,7 @@ document.querySelector('#app').innerHTML = `
       <label><input id="sideJson" type="checkbox" checked> JSON skeleton bên cạnh (offset)</label>
       <label><input id="flipJsonDepth" type="checkbox"> Đảo chiều sâu JSON Z (sửa trước/sau)</label>
       <label><input id="fitMappedPoints" type="checkbox" checked> Fit JSON bằng mapped bone points</label>
-      <label><input id="snapMapped" type="checkbox"> Ép mapped JSON trùng bone VRM</label>
+      <label><input id="snapMapped" type="checkbox" checked> Ép mapped JSON trùng bone VRM</label>
       <label><input id="autoBodyYaw" type="checkbox" checked> Xoay nguyên thân VRM theo hướng JSON</label>
       <label><input id="invertBodyYaw" type="checkbox"> Đảo hướng xoay thân VRM</label>
       <label><input id="flipJsonFacing" type="checkbox"> Xoay JSON 180° quanh Y (giữ shape)</label>
@@ -292,6 +293,7 @@ function initUi() {
     autoBodyYaw = e.target.checked;
     if (!autoBodyYaw) {
       bodyYaw = 0;
+      bodyYawInitialized = false;
       if (mixerRoot) mixerRoot.rotation.y = 0;
     }
     if (frames[currentFrameIndex]) setFrame(currentFrameIndex);
@@ -299,6 +301,7 @@ function initUi() {
   $('invertBodyYaw').onchange = (e) => {
     invertBodyYaw = e.target.checked;
     bodyYaw = 0;
+    bodyYawInitialized = false;
     if (frames[currentFrameIndex]) setFrame(currentFrameIndex);
   };
   $('flipJsonFacing').onchange = () => {
@@ -307,6 +310,7 @@ function initUi() {
   $('solverMode').onchange = (e) => {
     solverMode = e.target.value;
     bodyYaw = 0;
+    bodyYawInitialized = false;
     if (frames[currentFrameIndex]) setFrame(currentFrameIndex);
   };
   $('yawMatchShoulders').onchange = () => {
@@ -394,6 +398,8 @@ async function loadPoseFiles(files) {
 
 function afterPoseLoad() {
   currentFrameIndex = 0;
+  bodyYaw = 0;
+  bodyYawInitialized = false;
   $('scrub').max = Math.max(0, frames.length - 1);
   setFrame(0);
   setStatus(`Đã tải ${frames.length} khung hình`);
@@ -1211,11 +1217,22 @@ function applyJsonBodyYaw(frame) {
   if (!mixerRoot) return;
   if (!autoBodyYaw) {
     mixerRoot.rotation.y = 0;
+    bodyYawInitialized = false;
     return;
   }
   const targetYaw = computeJsonBodyYaw(frame);
   if (targetYaw == null) return;
-  bodyYaw += shortestAngleDelta(bodyYaw, targetYaw) * currentRetargetAlpha(0.35);
+  if (!bodyYawInitialized) {
+    bodyYaw = targetYaw;
+    bodyYawInitialized = true;
+  } else {
+    const delta = shortestAngleDelta(bodyYaw, targetYaw);
+    // Sapiens/body normals can briefly flip 180° on ambiguous side-view frames.
+    // Ignore those one-frame outliers instead of rotating the whole VRM over.
+    if (Math.abs(delta) > Math.PI * 0.55) return;
+    const maxStep = playing ? 0.08 : 0.18;
+    bodyYaw += THREE.MathUtils.clamp(delta * currentRetargetAlpha(0.35), -maxStep, maxStep);
+  }
   mixerRoot.rotation.y = bodyYaw;
   mixerRoot.updateMatrixWorld(true);
 }

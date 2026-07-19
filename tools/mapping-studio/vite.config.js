@@ -3,8 +3,8 @@ import { fileURLToPath } from 'node:url';
 import { defineConfig } from 'vite';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-// Repo assets: assets/models, assets/poses (case on disk is lowercase)
-const assetsRoot = path.resolve(__dirname, '../../assets');
+// Repo assets are stored as `Assets/`; URLs may still use /assets for compatibility.
+const assetsRoot = path.resolve(__dirname, '../../Assets');
 
 export default defineConfig({
   root: __dirname,
