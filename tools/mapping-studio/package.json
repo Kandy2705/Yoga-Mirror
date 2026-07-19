@@ -1,0 +1,19 @@
+{
+  "name": "yoga-mirror-mapping-studio",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite --host 0.0.0.0",
+    "build": "vite build",
+    "preview": "vite preview --host 0.0.0.0"
+  },
+  "dependencies": {
+    "@pixiv/three-vrm": "2.1.0",
+    "kalidokit": "1.1.5",
+    "three": "0.160.0"
+  },
+  "devDependencies": {
+    "vite": "^5.4.19"
+  }
+}
