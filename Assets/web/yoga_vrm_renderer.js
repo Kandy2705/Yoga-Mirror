@@ -10,11 +10,12 @@ let enableRetarget = false;
 
 let mirrorGuide = false;
 let retargetParts = { torso: true, arms: true, legs: true };
-const playbackRotationSmoothing = 0.4;
-const debugRotationSmoothing = 1.0;
+// Match Mapping Studio: softer while playing, hard snap when paused for debug.
+const playbackRetargetAlpha = 0.5;
+const debugRetargetAlpha = 1.0;
 
-function currentRetargetAlpha() {
-  return isPlaying ? playbackRotationSmoothing : debugRotationSmoothing;
+function currentRetargetAlpha(baseAlpha = playbackRetargetAlpha) {
+  return isPlaying ? baseAlpha : debugRetargetAlpha;
 }
 
 
@@ -338,6 +339,7 @@ async function loadVrmFromBase64Internal(base64) {
     normalizeVrmModel(vrm);
 
     captureRestPose();
+    calibrateRestDirections();
 
     step = 'opacity';
     if (typeof window.setGuideOpacity === 'function') {
@@ -350,7 +352,8 @@ async function loadVrmFromBase64Internal(base64) {
 
     setTimeout(() => {
       enableRetarget = true;
-      console.log('[YogaVRM] Retarget enabled');
+      console.log('[YogaVRM] Retarget enabled (IK = Mapping Studio)');
+      if (lastFrame) applyPoseToVrm(lastFrame);
     }, 500);
 
     postToFlutter({ type: 'ready' });
@@ -549,10 +552,13 @@ function isVisible(lm) {
   return lm && (lm.visibility ?? 1) > 0.5 && (lm.presence ?? 1) > 0.5;
 }
 
-function getLandmark(frame, index) {
+function getLandmark(frame, index, { requireVisible = false } = {}) {
   if (!frame || !frame.landmarks) return null;
   const lm = frame.landmarks.find((l) => l.index === index);
-  if (!lm || !isVisible(lm)) return null;
+  if (!lm) return null;
+  // Guide JSON is authoring data — do not drop joints on soft visibility dips
+  // (Mapping Studio also uses raw landmarks for retarget).
+  if (requireVisible && !isVisible(lm)) return null;
   return lm;
 }
 
@@ -721,41 +727,126 @@ window.runBoneSanityTest = function () {
 
 
 const _parentWorldQuat = new THREE.Quaternion();
-const _desiredWorldQuat = new THREE.Quaternion();
-const _stripYawQuat = new THREE.Quaternion();
-const _yawAxisY = new THREE.Vector3(0, 1, 0);
+const _desiredLocalQuat = new THREE.Quaternion();
+const _dir = new THREE.Vector3();
+const _rest = new THREE.Vector3();
 
+// Fallback rest directions (normalized VRM). Prefer calibratedRestDirs when available.
+const BONE_REST_DIR = {
+  hips: new THREE.Vector3(0, 1, 0),
+  spine: new THREE.Vector3(0, 1, 0),
+  chest: new THREE.Vector3(0, 1, 0),
+  upperChest: new THREE.Vector3(0, 1, 0),
+  neck: new THREE.Vector3(0, 1, 0),
+  head: new THREE.Vector3(0, 1, 0),
+  leftUpperArm: new THREE.Vector3(-1, 0, 0),
+  leftLowerArm: new THREE.Vector3(-1, 0, 0),
+  leftHand: new THREE.Vector3(-1, 0, 0),
+  rightUpperArm: new THREE.Vector3(1, 0, 0),
+  rightLowerArm: new THREE.Vector3(1, 0, 0),
+  rightHand: new THREE.Vector3(1, 0, 0),
+  leftUpperLeg: new THREE.Vector3(0, -1, 0),
+  leftLowerLeg: new THREE.Vector3(0, -1, 0),
+  leftFoot: new THREE.Vector3(0, -1, 0),
+  leftToes: new THREE.Vector3(0, 0, -1),
+  rightUpperLeg: new THREE.Vector3(0, -1, 0),
+  rightLowerLeg: new THREE.Vector3(0, -1, 0),
+  rightFoot: new THREE.Vector3(0, -1, 0),
+  rightToes: new THREE.Vector3(0, 0, -1),
+};
 
-function getParentWorldQuatForRetarget(bone, outQuat) {
-  bone.parent.getWorldQuaternion(outQuat);
-  
-  if (guideRoot) {
-    guideRoot.getWorldQuaternion(_stripYawQuat);
-    outQuat.premultiply(_stripYawQuat.invert());
+const REST_CHILD_BONE = {
+  leftUpperArm: 'leftLowerArm',
+  leftLowerArm: 'leftHand',
+  rightUpperArm: 'rightLowerArm',
+  rightLowerArm: 'rightHand',
+  leftUpperLeg: 'leftLowerLeg',
+  leftLowerLeg: 'leftFoot',
+  rightUpperLeg: 'rightLowerLeg',
+  rightLowerLeg: 'rightFoot',
+  leftFoot: 'leftToes',
+  rightFoot: 'rightToes',
+};
+
+/** @type {Map<string, THREE.Vector3>} parent-local rest direction per bone */
+const calibratedRestDirs = new Map();
+
+/**
+ * Measure each bone's rest direction in parent-local space from the actual VRM.
+ * Mapping Studio uses this so setFromUnitVectors targets the real skeleton, not
+ * generic axis assumptions.
+ */
+function calibrateRestDirections() {
+  calibratedRestDirs.clear();
+  if (!vrm?.humanoid) return;
+  vrm.scene.updateMatrixWorld(true);
+  if (guideRoot) guideRoot.updateMatrixWorld(true);
+  for (const [boneName, childName] of Object.entries(REST_CHILD_BONE)) {
+    const bone = vrm.humanoid.getNormalizedBoneNode(boneName);
+    const child = vrm.humanoid.getNormalizedBoneNode(childName);
+    if (!bone?.parent || !child) continue;
+    const from = bone.getWorldPosition(new THREE.Vector3());
+    const to = child.getWorldPosition(new THREE.Vector3());
+    const dir = to.sub(from);
+    if (dir.lengthSq() < 1e-8) continue;
+    bone.parent.getWorldQuaternion(_parentWorldQuat);
+    dir.applyQuaternion(_parentWorldQuat.clone().invert()).normalize();
+    calibratedRestDirs.set(boneName, dir.clone());
   }
-  return outQuat;
+  console.log('[YogaVRM] calibrated rest dirs:', calibratedRestDirs.size);
 }
 
-function applyBoneDirectionChain(bone, fromWorld, toWorld, defaultDir, alpha) {
-  if (!bone || !bone.parent) return;
+function restDirForBone(boneName, planar = false) {
+  const calibrated = calibratedRestDirs.get(boneName);
+  const fallback = BONE_REST_DIR[boneName] || new THREE.Vector3(0, -1, 0);
+  const rest = (calibrated || fallback).clone().normalize();
+  if (planar) {
+    rest.z = 0;
+    if (rest.lengthSq() < 1e-8) rest.copy(fallback).normalize();
+    else rest.normalize();
+  }
+  return rest;
+}
 
-  const direction = new THREE.Vector3().subVectors(toWorld, fromWorld);
-  if (direction.lengthSq() < 1e-6) return;
-  direction.normalize();
+/**
+ * Studio-aligned IK: convert world segment → parent-local direction, then
+ * set local quaternion from restDir → targetDir. No world-quat strip hacks.
+ */
+function applyBoneWorldFromTo(boneName, from, to, planar = false, correctionScale = 1) {
+  const bone = getBone(boneName);
+  if (!bone?.parent || !from || !to) return;
 
-  _desiredWorldQuat.setFromUnitVectors(defaultDir.clone().normalize(), direction);
+  _dir.subVectors(to, from);
+  if (planar) _dir.z = 0;
+  if (_dir.lengthSq() < 1e-8) return;
+  _dir.normalize();
 
-  getParentWorldQuatForRetarget(bone, _parentWorldQuat);
-  const localQuat = _parentWorldQuat.clone().invert().multiply(_desiredWorldQuat);
+  bone.parent.getWorldQuaternion(_parentWorldQuat);
+  _dir.applyQuaternion(_parentWorldQuat.clone().invert());
+  if (_dir.lengthSq() < 1e-8) return;
+  _dir.normalize();
 
-  bone.quaternion.slerp(localQuat, alpha ?? currentRetargetAlpha());
+  _rest.copy(restDirForBone(boneName, planar));
+
+  const dot = THREE.MathUtils.clamp(_rest.dot(_dir), -1, 1);
+  if (dot > 0.9995) return;
+  if (dot < -0.9995) {
+    _desiredLocalQuat.setFromAxisAngle(new THREE.Vector3(0, 0, 1), Math.PI);
+  } else {
+    _desiredLocalQuat.setFromUnitVectors(_rest, _dir);
+  }
+  bone.quaternion.slerp(
+    _desiredLocalQuat,
+    currentRetargetAlpha(0.5 * correctionScale),
+  );
   bone.updateMatrixWorld(true);
 }
 
-function applyBoneDirectionChainByName(boneName, from, to, defaultDir, alpha) {
-  const bone = getBone(boneName);
-  if (!bone) return;
-  applyBoneDirectionChain(bone, from, to, defaultDir, alpha);
+/** Legacy Kalidokit planar overrides — maps old signature onto studio IK. */
+function applyBoneDirectionChainByName(boneName, from, to, _defaultDir, alpha) {
+  const a = typeof alpha === 'number' ? alpha : 0.5;
+  // currentRetargetAlpha(0.5 * scale) ≈ a when playing if scale = 2a
+  applyBoneWorldFromTo(boneName, from, to, true, Math.max(0.1, a * 2));
 }
 
 function captureRestPose() {
@@ -783,6 +874,7 @@ function resetVrmPoseToRest() {
     if (bone) bone.quaternion.copy(quat);
   }
   vrm.scene.updateMatrixWorld(true);
+  if (guideRoot) guideRoot.updateMatrixWorld(true);
 }
 
 function getLandmarkPointByName(frame, landmarkName) {
@@ -847,6 +939,7 @@ function computeJsonBodyYaw(frame) {
 }
 
 function applyJsonBodyYaw(frame) {
+  // Same smoothing as Mapping Studio mixerRoot yaw
   const targetYaw = computeJsonBodyYaw(frame);
   if (targetYaw == null) return;
   if (!poseBodyYawInitialized) {
@@ -854,43 +947,42 @@ function applyJsonBodyYaw(frame) {
     poseBodyYawInitialized = true;
   } else {
     const delta = shortestAngleDelta(poseBodyYaw, targetYaw);
+    // Ignore one-frame 180° flips from ambiguous side views
     if (Math.abs(delta) > Math.PI * 0.55) return;
     const maxStep = isPlaying ? 0.08 : 0.18;
-    poseBodyYaw += THREE.MathUtils.clamp(delta * currentRetargetAlpha(), -maxStep, maxStep);
+    poseBodyYaw += THREE.MathUtils.clamp(
+      delta * currentRetargetAlpha(0.35),
+      -maxStep,
+      maxStep,
+    );
   }
 }
 
 
 
 function applyTorso(frame) {
+  // Match Mapping Studio applyIkTorso
   const ls = getLandmarkPoint(frame, LANDMARK.leftShoulder);
   const rs = getLandmarkPoint(frame, LANDMARK.rightShoulder);
   const hipL = getLandmarkPoint(frame, LANDMARK.leftHip);
   const hipR = getLandmarkPoint(frame, LANDMARK.rightHip);
   const nose = getMappedLandmarkPoint(frame, 'head')
     || getLandmarkPoint(frame, LANDMARK.nose);
-  const up = new THREE.Vector3(0, 1, 0);
 
   const hipCenter = midpoint(hipL, hipR);
   const shoulderCenter = midpoint(ls, rs);
 
   if (hipCenter && shoulderCenter) {
-    applyBoneDirectionChainByName('hips', hipCenter, shoulderCenter, up, 0.5);
-    vrm.scene.updateMatrixWorld(true);
-    applyBoneDirectionChainByName('spine', hipCenter, shoulderCenter, up, 0.7);
-    vrm.scene.updateMatrixWorld(true);
-    applyBoneDirectionChainByName('chest', hipCenter, shoulderCenter, up, 0.8);
-    vrm.scene.updateMatrixWorld(true);
+    applyBoneWorldFromTo('hips', hipCenter, shoulderCenter, false, 0.7);
+    applyBoneWorldFromTo('spine', hipCenter, shoulderCenter, false, 0.85);
+    applyBoneWorldFromTo('chest', hipCenter, shoulderCenter, false, 1);
+    applyBoneWorldFromTo('upperChest', hipCenter, shoulderCenter, false, 0.8);
   }
   if (shoulderCenter && nose) {
-    applyBoneDirectionChainByName('neck', shoulderCenter, nose, up, 0.6);
-    vrm.scene.updateMatrixWorld(true);
-    applyBoneDirectionChainByName('head', shoulderCenter, nose, up, 0.75);
-    vrm.scene.updateMatrixWorld(true);
+    applyBoneWorldFromTo('neck', shoulderCenter, nose, false, 0.65);
+    applyBoneWorldFromTo('head', shoulderCenter, nose, false, 0.55);
   }
 }
-
-
 
 function applyArm(frame, side) {
   const isLeft = side === 'left';
@@ -899,9 +991,7 @@ function applyArm(frame, side) {
   const lower = prefix + 'LowerArm';
   const hand = prefix + 'Hand';
 
-  const restDir = isLeft ? new THREE.Vector3(-1, 0, 0) : new THREE.Vector3(1, 0, 0);
-
-  
+  // Mapping-driven landmarks (cross-side map already encodes camera mirror)
   const s = getMappedLandmarkPoint(frame, upper);
   const e = getMappedLandmarkPoint(frame, lower);
   const w = getMappedLandmarkPoint(frame, hand);
@@ -909,20 +999,10 @@ function applyArm(frame, side) {
     getMappedLandmarkPoint(frame, prefix + 'IndexProximal') ||
     getMappedLandmarkPoint(frame, prefix + 'ThumbProximal');
 
-  if (s && e) {
-    applyBoneDirectionChainByName(upper, s, e, restDir);
-    vrm.scene.updateMatrixWorld(true);
-  }
-  if (e && w) {
-    applyBoneDirectionChainByName(lower, e, w, restDir);
-    vrm.scene.updateMatrixWorld(true);
-  }
-  if (w && (finger || e)) {
-    applyBoneDirectionChainByName(hand, w, finger || e, restDir, 0.5);
-    vrm.scene.updateMatrixWorld(true);
-  }
+  if (s && e) applyBoneWorldFromTo(upper, s, e, false, 1);
+  if (e && w) applyBoneWorldFromTo(lower, e, w, false, 1);
+  if (w && (finger || e)) applyBoneWorldFromTo(hand, w, finger || e, false, 0.9);
 }
-
 
 function applyLeg(frame, side) {
   const isLeft = side === 'left';
@@ -931,7 +1011,6 @@ function applyLeg(frame, side) {
   const lower = prefix + 'LowerLeg';
   const foot = prefix + 'Foot';
   const toes = prefix + 'Toes';
-  const down = new THREE.Vector3(0, -1, 0);
 
   const h = getMappedLandmarkPoint(frame, upper);
   const k = getMappedLandmarkPoint(frame, lower);
@@ -941,24 +1020,17 @@ function applyLeg(frame, side) {
   const heel = getLandmarkPointByName(frame, footGuide.heel);
   const toe = getLandmarkPointByName(frame, footGuide.toe);
 
-  if (h && k) {
-    applyBoneDirectionChainByName(upper, h, k, down);
-    vrm.scene.updateMatrixWorld(true);
-  }
-  if (k && a) {
-    applyBoneDirectionChainByName(lower, k, a, down);
-    vrm.scene.updateMatrixWorld(true);
-  }
+  if (h && k) applyBoneWorldFromTo(upper, h, k, false, 1);
+  if (k && a) applyBoneWorldFromTo(lower, k, a, false, 1);
+  // Studio: foot from heel → toe (or mapped toes), not ankle alone
   if (heel && toe) {
-    applyBoneDirectionChainByName(foot, heel, toe, new THREE.Vector3(0, 0, -1), 0.65);
-    vrm.scene.updateMatrixWorld(true);
+    applyBoneWorldFromTo(foot, heel, toe, false, 1);
   } else if (a && (k || h)) {
-    applyBoneDirectionChainByName(foot, k || h, a, down, 0.5);
-    vrm.scene.updateMatrixWorld(true);
+    applyBoneWorldFromTo(foot, k || h, a, false, 0.85);
   }
-  if (a && t) {
-    applyBoneDirectionChainByName(toes, a, t, new THREE.Vector3(0, 0, -1), 0.4);
-    vrm.scene.updateMatrixWorld(true);
+  // Only rotate toes when mapped (studio skips unmapped toes to avoid collapse)
+  if (a && t && BONE_LANDMARK_MAP[toes]) {
+    applyBoneWorldFromTo(toes, a, t, false, 0.8);
   }
 }
 
@@ -1001,10 +1073,12 @@ function computePlanarBodyYaw(frame) {
 function applyCustomPose(frame) {
   if (!vrm) return;
   if (frame.personDetected === false) return;
+  // Same path as Mapping Studio default: IK solver (no Kalidokit)
   lastRetargetMode = 'ik-solver';
   resetVrmPoseToRest();
   applyJsonBodyYaw(frame);
   applyGuideRootTransform();
+  if (guideRoot) guideRoot.updateMatrixWorld(true);
   if (retargetParts.torso) applyTorso(frame);
   if (retargetParts.arms) { applyArm(frame, 'left'); applyArm(frame, 'right'); }
   if (retargetParts.legs) { applyLeg(frame, 'left'); applyLeg(frame, 'right'); }

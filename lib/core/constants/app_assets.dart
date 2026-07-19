@@ -9,7 +9,7 @@ class AppAssets {
 
   /// Default guide motion (chunked meta).
   static const String defaultPoseMeta =
-      'Assets/sapiens2_to_mediapipe_video_3_with_z.json';
+      'assets/poses/sapiens2_to_mediapipe_video_3_with_z/meta.json';
 
   /// Other chunked poses (optional switch).
   static const String mediapipeVideo3Meta =
