@@ -1,13 +1,15 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/scheduler.dart';
 
-import '../../../core/constants/app_assets.dart';
 import '../controllers/yoga_mirror_controller.dart';
+import '../mannequin/mannequin_visual_spec.dart';
 import '../services/pose_stream_processor.dart';
 import 'camera_pose_view.dart';
+import 'mannequin_guide_overlay.dart';
 import 'playback_controls.dart';
-import 'vrm_model_webview.dart';
 
+/// Demo screen — temporary main guide = mannequin (Rive or spec painter).
+/// VRM WebView path is kept in repo but not mounted here on this branch.
 class YogaMirrorDemoScreen extends StatefulWidget {
   const YogaMirrorDemoScreen({
     super.key,
@@ -25,21 +27,13 @@ class YogaMirrorDemoScreen extends StatefulWidget {
 class _YogaMirrorDemoScreenState extends State<YogaMirrorDemoScreen>
     with SingleTickerProviderStateMixin {
   late final YogaMirrorController _controller;
-  final GlobalKey<VrmModelWebViewState> _vrmKey =
-      GlobalKey<VrmModelWebViewState>();
   Ticker? _ticker;
   Duration? _lastTick;
-  bool _debugOverlayEnabled = false;
-  bool _mappingToolEnabled = false;
-  /// Manual guide scale panel (mentor option 2.1).
+
   bool _scalePanelOpen = false;
-  double _manualScale = 0.7;
-  double _manualScaleY = 1.0;
-  double _manualScaleX = 1.0;
-  double _manualYOffset = 1.0;
-  /// 0=off, 1=vrm (modal bones), 2=json, 3=all
-  int _idLabelModeIndex = 0;
-  static const _idLabelModes = ['off', 'vrm', 'json', 'all'];
+  double _manualScale = 1.0;
+  double _manualYOffset = 0.0;
+  double _manualOpacity = MannequinVisualSpec.defaultOpacity;
 
   @override
   void initState() {
@@ -59,9 +53,7 @@ class _YogaMirrorDemoScreenState extends State<YogaMirrorDemoScreen>
   }
 
   void _onControllerChanged() {
-    if (mounted) {
-      setState(() {});
-    }
+    if (mounted) setState(() {});
   }
 
   void _onTick(Duration elapsed) {
@@ -69,7 +61,6 @@ class _YogaMirrorDemoScreenState extends State<YogaMirrorDemoScreen>
       _lastTick = elapsed;
       return;
     }
-
     final deltaMs = (elapsed - _lastTick!).inMilliseconds;
     _lastTick = elapsed;
     _controller.tick(deltaMs);
@@ -155,49 +146,6 @@ class _YogaMirrorDemoScreenState extends State<YogaMirrorDemoScreen>
             icon: const Icon(Icons.arrow_back_ios_new, color: Colors.white),
           ),
           IconButton(
-            onPressed: () =>
-                setState(() => _debugOverlayEnabled = !_debugOverlayEnabled),
-            icon: Icon(
-              Icons.bug_report,
-              color: _debugOverlayEnabled
-                  ? const Color(0xFFB388FF)
-                  : Colors.white54,
-            ),
-            tooltip: 'Debug overlay',
-          ),
-          IconButton(
-            onPressed: () =>
-                setState(() => _mappingToolEnabled = !_mappingToolEnabled),
-            icon: Icon(
-              Icons.account_tree_outlined,
-              color: _mappingToolEnabled
-                  ? const Color(0xFFB388FF)
-                  : Colors.white54,
-            ),
-            tooltip: 'Bone mapping tool',
-          ),
-          IconButton(
-            onPressed: () => setState(() {
-              _idLabelModeIndex =
-                  (_idLabelModeIndex + 1) % _idLabelModes.length;
-            }),
-            icon: Icon(
-              Icons.tag,
-              color: switch (_idLabelModeIndex) {
-                1 => const Color(0xFFB388FF), // VRM / modal
-                2 => const Color(0xFF7FDBFF), // JSON
-                3 => const Color(0xFFFFD54F), // all
-                _ => Colors.white54,
-              },
-            ),
-            tooltip: switch (_idLabelModeIndex) {
-              1 => 'ID labels: VRM (tap → JSON)',
-              2 => 'ID labels: JSON (tap → all)',
-              3 => 'ID labels: all (tap → off)',
-              _ => 'ID labels: off (tap → VRM)',
-            },
-          ),
-          IconButton(
             onPressed: () => setState(() => _scalePanelOpen = !_scalePanelOpen),
             icon: Icon(
               Icons.open_with,
@@ -205,27 +153,22 @@ class _YogaMirrorDemoScreenState extends State<YogaMirrorDemoScreen>
                   ? const Color(0xFFB388FF)
                   : Colors.white54,
             ),
-            tooltip: 'Căn chỉnh scale avatar',
+            tooltip: 'Căn chỉnh mannequin',
           ),
           Expanded(
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Row(
-                  children: [
-                    Text(
-                      'YogaMirror',
-                      style: TextStyle(
-                        color: Colors.white,
-                        fontSize: compact ? 18 : 22,
-                        fontWeight: FontWeight.w700,
-                      ),
-                    ),
-                    const SizedBox(width: 8),
-                  ],
+                Text(
+                  'YogaMirror',
+                  style: TextStyle(
+                    color: Colors.white,
+                    fontSize: compact ? 18 : 22,
+                    fontWeight: FontWeight.w700,
+                  ),
                 ),
                 Text(
-                  _controller.exerciseName,
+                  'Mannequin guide · ${_controller.exerciseName}',
                   style: TextStyle(
                     color: Colors.white60,
                     fontSize: compact ? 12 : 14,
@@ -238,6 +181,7 @@ class _YogaMirrorDemoScreenState extends State<YogaMirrorDemoScreen>
       ),
     );
   }
+
   Widget _buildCameraStack() {
     if (_controller.loadError != null) {
       return Center(
@@ -252,54 +196,46 @@ class _YogaMirrorDemoScreenState extends State<YogaMirrorDemoScreen>
       );
     }
 
-    // Camera + VRM start immediately; pose JSON (~15MB) loads in background.
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 12),
-      child: LayoutBuilder(
-        builder: (context, constraints) {
-          return ClipRRect(
-            borderRadius: BorderRadius.circular(18),
-            child: Stack(
-              fit: StackFit.expand,
-              children: [
-                CameraPoseView(
-                  controller: _controller,
-                  poseProcessor: widget.poseProcessor,
-                ),
-                VrmModelWebView(
-                  key: _vrmKey,
-                  modelAssetPath: AppAssets.yogaAvatarVrm,
-                  currentFrame: _controller.currentSampleFrame,
-                  opacity: 0.65,
-                  isPlaying: _controller.isPlaying,
-                  debugOverlayEnabled: _debugOverlayEnabled,
-                  mappingToolEnabled: _mappingToolEnabled,
-                  idLabelMode: _idLabelModes[_idLabelModeIndex],
-                ),
-                if (_controller.isLoading)
-                  const Align(
-                    alignment: Alignment.topCenter,
-                    child: Padding(
-                      padding: EdgeInsets.only(top: 12),
-                      child: _LoadChip(label: 'Đang tải mẫu động tác...'),
-                    ),
-                  )
-                else if (_controller.isBufferingChunks)
-                  Align(
-                    alignment: Alignment.topCenter,
-                    child: Padding(
-                      padding: const EdgeInsets.only(top: 12),
-                      child: _LoadChip(
-                        label:
-                            'Đang nạp thêm pose ${_controller.loadedChunkCount}/${_controller.totalChunkCount}…',
-                      ),
-                    ),
-                  ),
-                if (_scalePanelOpen) _buildScalePanel(),
-              ],
+      child: ClipRRect(
+        borderRadius: BorderRadius.circular(18),
+        child: Stack(
+          fit: StackFit.expand,
+          children: [
+            CameraPoseView(
+              controller: _controller,
+              poseProcessor: widget.poseProcessor,
             ),
-          );
-        },
+            MannequinGuideOverlay(
+              frame: _controller.currentSampleFrame,
+              opacity: _manualOpacity,
+              scale: _manualScale,
+              yOffset: _manualYOffset,
+              isPlaying: _controller.isPlaying,
+            ),
+            if (_controller.isLoading)
+              const Align(
+                alignment: Alignment.topCenter,
+                child: Padding(
+                  padding: EdgeInsets.only(top: 12),
+                  child: _LoadChip(label: 'Đang tải mẫu động tác...'),
+                ),
+              )
+            else if (_controller.isBufferingChunks)
+              Align(
+                alignment: Alignment.topCenter,
+                child: Padding(
+                  padding: const EdgeInsets.only(top: 12),
+                  child: _LoadChip(
+                    label:
+                        'Đang nạp thêm pose ${_controller.loadedChunkCount}/${_controller.totalChunkCount}…',
+                  ),
+                ),
+              ),
+            if (_scalePanelOpen) _buildScalePanel(),
+          ],
+        ),
       ),
     );
   }
@@ -320,7 +256,7 @@ class _YogaMirrorDemoScreenState extends State<YogaMirrorDemoScreen>
                 children: [
                   const Expanded(
                     child: Text(
-                      'Căn chỉnh avatar',
+                      'Căn chỉnh mannequin',
                       style: TextStyle(
                         color: Colors.white,
                         fontWeight: FontWeight.w600,
@@ -330,12 +266,10 @@ class _YogaMirrorDemoScreenState extends State<YogaMirrorDemoScreen>
                   ),
                   TextButton(
                     onPressed: () {
-                      _vrmKey.currentState?.resetSessionScale();
                       setState(() {
-                        _manualScale = 0.7;
-                        _manualScaleX = 1.0;
-                        _manualScaleY = 1.0;
-                        _manualYOffset = 1.0;
+                        _manualScale = 1.0;
+                        _manualYOffset = 0.0;
+                        _manualOpacity = MannequinVisualSpec.defaultOpacity;
                       });
                     },
                     child: const Text('Reset'),
@@ -347,50 +281,29 @@ class _YogaMirrorDemoScreenState extends State<YogaMirrorDemoScreen>
                 ],
               ),
               _scaleSlider(
-                label: 'Scale chung',
+                label: 'Scale',
                 value: _manualScale,
-                min: 0.3,
-                max: 1.5,
-                onChanged: (v) {
-                  setState(() => _manualScale = v);
-                  _pushManualScale();
-                },
-              ),
-              _scaleSlider(
-                label: 'Chiều cao (Y)',
-                value: _manualScaleY,
-                min: 0.5,
+                min: 0.4,
                 max: 1.8,
-                onChanged: (v) {
-                  setState(() => _manualScaleY = v);
-                  _pushManualScale();
-                },
-              ),
-              _scaleSlider(
-                label: 'Bề ngang (X)',
-                value: _manualScaleX,
-                min: 0.5,
-                max: 1.8,
-                onChanged: (v) {
-                  setState(() => _manualScaleX = v);
-                  _pushManualScale();
-                },
+                onChanged: (v) => setState(() => _manualScale = v),
               ),
               _scaleSlider(
                 label: 'Lên / xuống',
                 value: _manualYOffset,
-                min: -0.5,
-                max: 2.0,
-                onChanged: (v) {
-                  setState(() => _manualYOffset = v);
-                  _pushManualScale();
-                },
+                min: -120,
+                max: 120,
+                onChanged: (v) => setState(() => _manualYOffset = v),
               ),
-              const SizedBox(height: 4),
+              _scaleSlider(
+                label: 'Độ mờ',
+                value: _manualOpacity,
+                min: 0.2,
+                max: 1.0,
+                onChanged: (v) => setState(() => _manualOpacity = v),
+              ),
               Text(
-                'Tự scale theo body (1 lần khi bắt đầu) sẽ qua API '
-                'applySessionBodyScale / fitGuideToUserFromFrame — '
-                'không scale lại khi cam đang chạy.',
+                'Guide: mannequin vector 1 màu, từng bộ phận bind JSON landmarks '
+                '(góc/vị trí khớp). Không vẽ skeleton/debug chấm.',
                 style: TextStyle(
                   color: Colors.white.withValues(alpha: 0.45),
                   fontSize: 11,
@@ -429,24 +342,14 @@ class _YogaMirrorDemoScreenState extends State<YogaMirrorDemoScreen>
           ),
         ),
         SizedBox(
-          width: 40,
+          width: 44,
           child: Text(
-            value.toStringAsFixed(2),
+            value.toStringAsFixed(value.abs() >= 10 ? 0 : 2),
             style: const TextStyle(color: Colors.white54, fontSize: 11),
             textAlign: TextAlign.end,
           ),
         ),
       ],
-    );
-  }
-
-  void _pushManualScale() {
-    _vrmKey.currentState?.setGuideTransform(
-      scale: _manualScale,
-      scaleX: _manualScaleX,
-      scaleY: _manualScaleY,
-      yOffset: _manualYOffset,
-      force: true,
     );
   }
 }

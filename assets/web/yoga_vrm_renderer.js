@@ -777,14 +777,57 @@ const REST_CHILD_BONE = {
 
 /** @type {Map<string, THREE.Vector3>} parent-local rest direction per bone */
 const calibratedRestDirs = new Map();
+/** @type {Map<string, number>} rest length bone → child (world units) */
+const restBoneLengths = new Map();
 
 /**
- * Measure each bone's rest direction in parent-local space from the actual VRM.
- * Mapping Studio uses this so setFromUnitVectors targets the real skeleton, not
- * generic axis assumptions.
+ * Soft 1:1 joint matching:
+ * - Pull limb end/mid toward mapped landmarks (aligned into VRM space)
+ * - Clamp reach to rest bone lengths ± tolerance so VRM bones don't "stretch/break"
+ * - Quaternion-only (skeleton lengths stay fixed); error = residual position gap
+ */
+const SOFT_MATCH = {
+  enabled: true,
+  /** Allow aiming slightly past full reach before clamp (still no bone scale). */
+  maxReachScale: 1.05,
+  /** Min fold distance as fraction of |lenA-lenB| floor. */
+  minReachScale: 0.12,
+  /** How much JSON elbow/knee pulls the bend pole (0–1). */
+  midLandmarkWeight: 0.8,
+  /** Scrub/play: full apply of IK directions. */
+  ikAlpha: 1.0,
+  /** Dead-zone (m) — skip micro jitter. */
+  deadZone: 0.006,
+  /** Clamp auto scale JSON→VRM so outliers don't explode limbs. */
+  minAlignScale: 0.55,
+  maxAlignScale: 1.85,
+};
+
+/**
+ * Light per-limb length scale (option B): match segment length JSON↔VRM
+ * without full stretch. Clamp tight to avoid mesh twist / "broken" look.
+ */
+const LIMB_SCALE = {
+  enabled: true,
+  min: 0.92,
+  max: 1.08,
+  /** 0 = always rest length, 1 = full clamped ratio */
+  strength: 0.9,
+  /** |ratio-1| below this → keep scale 1 */
+  deadZone: 0.015,
+};
+
+const LIMB_SCALE_BONES = [
+  'leftUpperArm', 'leftLowerArm', 'rightUpperArm', 'rightLowerArm',
+  'leftUpperLeg', 'leftLowerLeg', 'rightUpperLeg', 'rightLowerLeg',
+];
+
+/**
+ * Measure each bone's rest direction + length from the actual VRM.
  */
 function calibrateRestDirections() {
   calibratedRestDirs.clear();
+  restBoneLengths.clear();
   if (!vrm?.humanoid) return;
   vrm.scene.updateMatrixWorld(true);
   if (guideRoot) guideRoot.updateMatrixWorld(true);
@@ -794,13 +837,226 @@ function calibrateRestDirections() {
     if (!bone?.parent || !child) continue;
     const from = bone.getWorldPosition(new THREE.Vector3());
     const to = child.getWorldPosition(new THREE.Vector3());
-    const dir = to.sub(from);
-    if (dir.lengthSq() < 1e-8) continue;
+    const seg = to.sub(from);
+    const len = seg.length();
+    if (len < 1e-8) continue;
+    restBoneLengths.set(boneName, len);
     bone.parent.getWorldQuaternion(_parentWorldQuat);
-    dir.applyQuaternion(_parentWorldQuat.clone().invert()).normalize();
-    calibratedRestDirs.set(boneName, dir.clone());
+    seg.applyQuaternion(_parentWorldQuat.clone().invert()).normalize();
+    calibratedRestDirs.set(boneName, seg.clone());
   }
-  console.log('[YogaVRM] calibrated rest dirs:', calibratedRestDirs.size);
+  console.log(
+    '[YogaVRM] calibrated rest dirs:', calibratedRestDirs.size,
+    'lengths:', restBoneLengths.size,
+  );
+}
+
+/**
+ * Rigid-ish align: translate hip + uniform scale torso so JSON joints
+ * live near VRM joint space (needed for soft position match).
+ */
+function computeSoftAlign(frame) {
+  if (!vrm?.humanoid || !frame) return null;
+  const mpHipL = getLandmarkPoint(frame, LANDMARK.leftHip);
+  const mpHipR = getLandmarkPoint(frame, LANDMARK.rightHip);
+  const mpShL = getLandmarkPoint(frame, LANDMARK.leftShoulder);
+  const mpShR = getLandmarkPoint(frame, LANDMARK.rightShoulder);
+  const mpHip = midpoint(mpHipL, mpHipR);
+  const mpSh = midpoint(mpShL, mpShR);
+  if (!mpHip || !mpSh) return null;
+  const mpLen = mpSh.distanceTo(mpHip);
+  if (mpLen < 1e-5) return null;
+
+  if (guideRoot) guideRoot.updateMatrixWorld(true);
+  vrm.scene.updateMatrixWorld(true);
+
+  const hipsBone = vrm.humanoid.getNormalizedBoneNode('hips');
+  if (!hipsBone) return null;
+  const vrmHip = hipsBone.getWorldPosition(new THREE.Vector3());
+
+  const lsBone = vrm.humanoid.getNormalizedBoneNode('leftUpperArm')
+    || vrm.humanoid.getNormalizedBoneNode('leftShoulder');
+  const rsBone = vrm.humanoid.getNormalizedBoneNode('rightUpperArm')
+    || vrm.humanoid.getNormalizedBoneNode('rightShoulder');
+  if (!lsBone || !rsBone) return null;
+  const vrmLs = lsBone.getWorldPosition(new THREE.Vector3());
+  const vrmRs = rsBone.getWorldPosition(new THREE.Vector3());
+  const vrmSh = midpoint(vrmLs, vrmRs);
+  if (!vrmSh) return null;
+  const vrmLen = vrmSh.distanceTo(vrmHip);
+  if (vrmLen < 1e-5) return null;
+
+  const scale = THREE.MathUtils.clamp(
+    vrmLen / mpLen,
+    SOFT_MATCH.minAlignScale,
+    SOFT_MATCH.maxAlignScale,
+  );
+  return { mpHip: mpHip.clone(), vrmHip: vrmHip.clone(), scale };
+}
+
+function softAlignPoint(p, align) {
+  if (!p || !align) return null;
+  return p.clone().sub(align.mpHip).multiplyScalar(align.scale).add(align.vrmHip);
+}
+
+function softAlignMapped(frame, boneName, align) {
+  return softAlignPoint(getMappedLandmarkPoint(frame, boneName), align);
+}
+
+/**
+ * Analytical 2-bone IK with soft reach clamp + landmark mid as pole.
+ * Bones keep rest lengths; only rotations change → no "broken" stretch.
+ * @returns {boolean} applied
+ */
+function resetLimbScales() {
+  if (!vrm?.humanoid) return;
+  for (const name of LIMB_SCALE_BONES) {
+    const bone = vrm.humanoid.getNormalizedBoneNode(name);
+    if (bone) bone.scale.set(1, 1, 1);
+  }
+}
+
+/**
+ * Scale one limb bone so rest length approaches targetWorldLen.
+ * Uses axis scale (X arms / Y legs) to reduce uniform "puff".
+ * @returns {number} applied scale factor
+ */
+function setBoneLengthScale(boneName, targetWorldLen) {
+  const bone = getBone(boneName);
+  const rest = restBoneLengths.get(boneName);
+  if (!bone || !LIMB_SCALE.enabled) {
+    if (bone) bone.scale.set(1, 1, 1);
+    return 1;
+  }
+  if (!rest || rest < 1e-6 || !targetWorldLen || targetWorldLen < 1e-6) {
+    bone.scale.set(1, 1, 1);
+    return 1;
+  }
+
+  let s = targetWorldLen / rest;
+  s = THREE.MathUtils.clamp(s, LIMB_SCALE.min, LIMB_SCALE.max);
+  if (Math.abs(s - 1) < LIMB_SCALE.deadZone) s = 1;
+  s = THREE.MathUtils.lerp(1, s, LIMB_SCALE.strength);
+
+  // Normalized VRM: arms ~ local X, legs ~ local Y
+  if (boneName.includes('Arm')) {
+    bone.scale.set(s, 1, 1);
+  } else if (boneName.includes('Leg')) {
+    bone.scale.set(1, s, 1);
+  } else {
+    bone.scale.setScalar(s);
+  }
+  return s;
+}
+
+/** Rest length × current bone scale (for IK after limb scale). */
+function effectiveBoneLength(boneName) {
+  const rest = restBoneLengths.get(boneName) || 0.22;
+  const bone = getBone(boneName);
+  if (!bone) return rest;
+  if (boneName.includes('Arm')) return rest * bone.scale.x;
+  if (boneName.includes('Leg')) return rest * bone.scale.y;
+  return rest * (bone.scale.x + bone.scale.y + bone.scale.z) / 3;
+}
+
+/**
+ * Apply light length scales for a limb chain from aligned joint distances.
+ */
+function applyLimbSegmentScales(upperName, lowerName, rootPt, midPt, endPt) {
+  if (!LIMB_SCALE.enabled) return;
+  if (rootPt && midPt) setBoneLengthScale(upperName, rootPt.distanceTo(midPt));
+  else setBoneLengthScale(upperName, null);
+  if (midPt && endPt) setBoneLengthScale(lowerName, midPt.distanceTo(endPt));
+  else if (rootPt && endPt) {
+    // no mid: split total length 50/50 as soft hint
+    const half = rootPt.distanceTo(endPt) * 0.5;
+    setBoneLengthScale(upperName, half);
+    setBoneLengthScale(lowerName, half);
+  } else {
+    setBoneLengthScale(lowerName, null);
+  }
+}
+
+function applySoftTwoBoneIK(upperName, lowerName, midTarget, endTarget, poleHint) {
+  const upper = getBone(upperName);
+  const lower = getBone(lowerName);
+  if (!upper || !lower || !endTarget) return false;
+
+  upper.updateMatrixWorld(true);
+  const root = upper.getWorldPosition(new THREE.Vector3());
+
+  const lenA = effectiveBoneLength(upperName);
+  const lenB = effectiveBoneLength(lowerName);
+  const maxReach = (lenA + lenB) * SOFT_MATCH.maxReachScale;
+  const minReach = Math.max(0.02, Math.abs(lenA - lenB) + lenA * SOFT_MATCH.minReachScale);
+
+  let end = endTarget.clone();
+  let toEnd = end.clone().sub(root);
+  let dist = toEnd.length();
+  if (dist < SOFT_MATCH.deadZone) return false;
+
+  // Soft clamp target into reachable sphere (sai số: end may not hit exact landmark)
+  if (dist > maxReach) {
+    toEnd.normalize().multiplyScalar(maxReach);
+    end.copy(root).add(toEnd);
+    dist = maxReach;
+  } else if (dist < minReach) {
+    toEnd.normalize().multiplyScalar(minReach);
+    end.copy(root).add(toEnd);
+    dist = minReach;
+  } else {
+    toEnd.multiplyScalar(1); // keep
+  }
+
+  const axis = end.clone().sub(root).normalize();
+
+  // Bend plane from mid landmark (elbow/knee), else poleHint, else default
+  let pole = new THREE.Vector3();
+  if (midTarget) {
+    const midRel = midTarget.clone().sub(root);
+    pole.copy(midRel).sub(axis.clone().multiplyScalar(midRel.dot(axis)));
+  }
+  if (pole.lengthSq() < 1e-8 && poleHint) {
+    pole.copy(poleHint).sub(axis.clone().multiplyScalar(poleHint.dot(axis)));
+  }
+  if (pole.lengthSq() < 1e-8) {
+    // default: bend roughly toward camera / front
+    pole.set(0, 0, 1);
+    pole.sub(axis.clone().multiplyScalar(pole.dot(axis)));
+  }
+  if (pole.lengthSq() < 1e-8) {
+    pole.set(0, 1, 0).cross(axis);
+  }
+  if (pole.lengthSq() < 1e-8) return false;
+  pole.normalize();
+
+  // Soft blend pole toward landmark mid residual
+  if (midTarget && SOFT_MATCH.midLandmarkWeight > 0) {
+    const midRel = midTarget.clone().sub(root);
+    const midPole = midRel.sub(axis.clone().multiplyScalar(midRel.dot(axis)));
+    if (midPole.lengthSq() > 1e-8) {
+      midPole.normalize();
+      pole.lerp(midPole, SOFT_MATCH.midLandmarkWeight).normalize();
+    }
+  }
+
+  // Law of cosines — angle at root between axis and upper bone
+  const cosRoot = THREE.MathUtils.clamp(
+    (lenA * lenA + dist * dist - lenB * lenB) / (2 * lenA * dist),
+    -1,
+    1,
+  );
+  const sinRoot = Math.sqrt(Math.max(0, 1 - cosRoot * cosRoot));
+  const midPos = root.clone()
+    .add(axis.clone().multiplyScalar(lenA * cosRoot))
+    .add(pole.clone().multiplyScalar(lenA * sinRoot));
+
+  // Rotate upper root→mid, lower mid→end (fixed lengths implied by dirs only)
+  applyBoneWorldFromTo(upperName, root, midPos, false, SOFT_MATCH.ikAlpha);
+  lower.updateMatrixWorld(true);
+  const midActual = lower.getWorldPosition(new THREE.Vector3());
+  applyBoneWorldFromTo(lowerName, midActual, end, false, SOFT_MATCH.ikAlpha);
+  return true;
 }
 
 function restDirForBone(boneName, planar = false) {
@@ -879,6 +1135,8 @@ function resetVrmPoseToRest() {
     const bone = vrm.humanoid.getNormalizedBoneNode(name);
     if (bone) bone.quaternion.copy(quat);
   }
+  // Clear limb length scales every frame before re-apply
+  resetLimbScales();
   vrm.scene.updateMatrixWorld(true);
   if (guideRoot) guideRoot.updateMatrixWorld(true);
 }
@@ -1025,27 +1283,57 @@ function applyTorso(frame) {
   }
 }
 
-function applyArm(frame, side) {
+function applyArm(frame, side, align) {
   const isLeft = side === 'left';
   const prefix = isLeft ? 'left' : 'right';
   const upper = prefix + 'UpperArm';
   const lower = prefix + 'LowerArm';
   const hand = prefix + 'Hand';
 
-  // Mapping-driven landmarks (cross-side map already encodes camera mirror)
-  const s = getMappedLandmarkPoint(frame, upper);
-  const e = getMappedLandmarkPoint(frame, lower);
-  const w = getMappedLandmarkPoint(frame, hand);
-  const finger =
+  // Mapped landmarks (cross L/R) → soft-aligned into VRM space for 1:1 pull
+  const sRaw = getMappedLandmarkPoint(frame, upper);
+  const eRaw = getMappedLandmarkPoint(frame, lower);
+  const wRaw = getMappedLandmarkPoint(frame, hand);
+  const fingerRaw =
     getMappedLandmarkPoint(frame, prefix + 'IndexProximal') ||
     getMappedLandmarkPoint(frame, prefix + 'ThumbProximal');
 
-  if (s && e) applyBoneWorldFromTo(upper, s, e, false, 1);
-  if (e && w) applyBoneWorldFromTo(lower, e, w, false, 1);
-  if (w && (finger || e)) applyBoneWorldFromTo(hand, w, finger || e, false, 0.9);
+  const s = align ? softAlignPoint(sRaw, align) : sRaw;
+  const e = align ? softAlignPoint(eRaw, align) : eRaw;
+  const w = align ? softAlignPoint(wRaw, align) : wRaw;
+  const finger = align ? softAlignPoint(fingerRaw, align) : fingerRaw;
+
+  // B: light length scale shoulder→elbow, elbow→wrist (clamped 0.92–1.08)
+  applyLimbSegmentScales(upper, lower, s, e, w);
+  if (vrm?.scene) vrm.scene.updateMatrixWorld(true);
+
+  if (SOFT_MATCH.enabled && w && (e || s)) {
+    // 2-bone soft IK after scale: elbow + wrist toward mapped points
+    const pole = e || null;
+    const ok = applySoftTwoBoneIK(upper, lower, pole, w, new THREE.Vector3(0, 0, 1));
+    if (!ok && sRaw && eRaw) {
+      applyBoneWorldFromTo(upper, sRaw, eRaw, false, 1);
+      if (eRaw && wRaw) applyBoneWorldFromTo(lower, eRaw, wRaw, false, 1);
+    }
+  } else {
+    if (sRaw && eRaw) applyBoneWorldFromTo(upper, sRaw, eRaw, false, 1);
+    if (eRaw && wRaw) applyBoneWorldFromTo(lower, eRaw, wRaw, false, 1);
+  }
+
+  // Hand: aim toward finger landmark (direction only — short bone)
+  if (wRaw && (fingerRaw || eRaw)) {
+    applyBoneWorldFromTo(hand, wRaw, fingerRaw || eRaw, false, 0.9);
+  } else if (w && finger) {
+    const handBone = getBone(hand);
+    if (handBone) {
+      handBone.updateMatrixWorld(true);
+      const hw = handBone.getWorldPosition(new THREE.Vector3());
+      applyBoneWorldFromTo(hand, hw, finger, false, 0.9);
+    }
+  }
 }
 
-function applyLeg(frame, side) {
+function applyLeg(frame, side, align) {
   const isLeft = side === 'left';
   const prefix = isLeft ? 'left' : 'right';
   const upper = prefix + 'UpperLeg';
@@ -1053,25 +1341,54 @@ function applyLeg(frame, side) {
   const foot = prefix + 'Foot';
   const toes = prefix + 'Toes';
 
-  const h = getMappedLandmarkPoint(frame, upper);
-  const k = getMappedLandmarkPoint(frame, lower);
-  const a = getMappedLandmarkPoint(frame, foot);
-  const t = getMappedLandmarkPoint(frame, toes);
+  const hRaw = getMappedLandmarkPoint(frame, upper);
+  const kRaw = getMappedLandmarkPoint(frame, lower);
+  const aRaw = getMappedLandmarkPoint(frame, foot);
+  const tRaw = getMappedLandmarkPoint(frame, toes);
   const footGuide = footGuideLandmarksForBone(foot);
-  const heel = getLandmarkPointByName(frame, footGuide.heel);
-  const toe = getLandmarkPointByName(frame, footGuide.toe);
+  const heelRaw = getLandmarkPointByName(frame, footGuide.heel);
+  const toeRaw = getLandmarkPointByName(frame, footGuide.toe);
 
-  if (h && k) applyBoneWorldFromTo(upper, h, k, false, 1);
-  if (k && a) applyBoneWorldFromTo(lower, k, a, false, 1);
-  // Studio: foot from heel → toe (or mapped toes), not ankle alone
-  if (heel && toe) {
-    applyBoneWorldFromTo(foot, heel, toe, false, 1);
-  } else if (a && (k || h)) {
-    applyBoneWorldFromTo(foot, k || h, a, false, 0.85);
+  const h = align ? softAlignPoint(hRaw, align) : hRaw;
+  const k = align ? softAlignPoint(kRaw, align) : kRaw;
+  const a = align ? softAlignPoint(aRaw, align) : aRaw;
+  const heel = align ? softAlignPoint(heelRaw, align) : heelRaw;
+  const toe = align ? softAlignPoint(toeRaw, align) : toeRaw;
+
+  // B: light length scale hip→knee, knee→ankle
+  applyLimbSegmentScales(upper, lower, h, k, a);
+  if (vrm?.scene) vrm.scene.updateMatrixWorld(true);
+
+  if (SOFT_MATCH.enabled && a && (k || h)) {
+    const ok = applySoftTwoBoneIK(upper, lower, k, a, new THREE.Vector3(0, 0, 1));
+    if (!ok && hRaw && kRaw) {
+      applyBoneWorldFromTo(upper, hRaw, kRaw, false, 1);
+      if (kRaw && aRaw) applyBoneWorldFromTo(lower, kRaw, aRaw, false, 1);
+    }
+  } else {
+    if (hRaw && kRaw) applyBoneWorldFromTo(upper, hRaw, kRaw, false, 1);
+    if (kRaw && aRaw) applyBoneWorldFromTo(lower, kRaw, aRaw, false, 1);
   }
-  // Only rotate toes when mapped (studio skips unmapped toes to avoid collapse)
-  if (a && t && BONE_LANDMARK_MAP[toes]) {
-    applyBoneWorldFromTo(toes, a, t, false, 0.8);
+
+  // Foot orientation: heel→toe (direction), not forced ankle position
+  if (heelRaw && toeRaw) {
+    applyBoneWorldFromTo(foot, heelRaw, toeRaw, false, 1);
+  } else if (heel && toe) {
+    const footBone = getBone(foot);
+    if (footBone) {
+      footBone.updateMatrixWorld(true);
+      const fw = footBone.getWorldPosition(new THREE.Vector3());
+      const toeA = toe;
+      // build a direction target a small step from heel toward toe in aligned space
+      if (heel && toeA) applyBoneWorldFromTo(foot, heel, toeA, false, 1);
+      else applyBoneWorldFromTo(foot, fw, toeA, false, 0.85);
+    }
+  } else if (aRaw && (kRaw || hRaw)) {
+    applyBoneWorldFromTo(foot, kRaw || hRaw, aRaw, false, 0.85);
+  }
+
+  if (aRaw && tRaw && BONE_LANDMARK_MAP[toes]) {
+    applyBoneWorldFromTo(toes, aRaw, tRaw, false, 0.8);
   }
 }
 
@@ -1114,17 +1431,58 @@ function computePlanarBodyYaw(frame) {
 function applyCustomPose(frame) {
   if (!vrm) return;
   if (frame.personDetected === false) return;
-  // Same path as Mapping Studio default: IK solver (no Kalidokit)
-  lastRetargetMode = 'ik-solver';
+  // Soft 1:1 + optional light limb length scale (clamped)
+  lastRetargetMode = SOFT_MATCH.enabled
+    ? (LIMB_SCALE.enabled ? 'soft-1to1+limbScale' : 'soft-1to1-ik')
+    : (LIMB_SCALE.enabled ? 'ik+limbScale' : 'ik-solver');
   resetVrmPoseToRest();
   applyJsonBodyYaw(frame);
   applyGuideRootTransform();
   if (guideRoot) guideRoot.updateMatrixWorld(true);
+  vrm.scene.updateMatrixWorld(true);
+
+  // Torso first so shoulder/hip roots for limbs are roughly right
   if (retargetParts.torso) applyTorso(frame);
-  if (retargetParts.arms) { applyArm(frame, 'left'); applyArm(frame, 'right'); }
-  if (retargetParts.legs) { applyLeg(frame, 'left'); applyLeg(frame, 'right'); }
+  vrm.scene.updateMatrixWorld(true);
+
+  // Align even if only limb-scale is on (needs VRM-space segment lengths)
+  const align = (SOFT_MATCH.enabled || LIMB_SCALE.enabled)
+    ? computeSoftAlign(frame)
+    : null;
+  if (retargetParts.arms) {
+    applyArm(frame, 'left', align);
+    applyArm(frame, 'right', align);
+  }
+  if (retargetParts.legs) {
+    applyLeg(frame, 'left', align);
+    applyLeg(frame, 'right', align);
+  }
   if (vrm.humanoid) vrm.humanoid.update(0);
 }
+
+window.setSoftMatch = function (enabled, opts) {
+  SOFT_MATCH.enabled = !!enabled;
+  if (opts && typeof opts === 'object') {
+    if (opts.maxReachScale != null) SOFT_MATCH.maxReachScale = Number(opts.maxReachScale);
+    if (opts.midLandmarkWeight != null) SOFT_MATCH.midLandmarkWeight = Number(opts.midLandmarkWeight);
+    if (opts.minAlignScale != null) SOFT_MATCH.minAlignScale = Number(opts.minAlignScale);
+    if (opts.maxAlignScale != null) SOFT_MATCH.maxAlignScale = Number(opts.maxAlignScale);
+  }
+  console.log('[YogaVRM] SOFT_MATCH', SOFT_MATCH);
+  if (lastFrame) applyPoseToVrm(lastFrame);
+};
+
+window.setLimbScale = function (enabled, opts) {
+  LIMB_SCALE.enabled = !!enabled;
+  if (opts && typeof opts === 'object') {
+    if (opts.min != null) LIMB_SCALE.min = Number(opts.min);
+    if (opts.max != null) LIMB_SCALE.max = Number(opts.max);
+    if (opts.strength != null) LIMB_SCALE.strength = Number(opts.strength);
+    if (opts.deadZone != null) LIMB_SCALE.deadZone = Number(opts.deadZone);
+  }
+  console.log('[YogaVRM] LIMB_SCALE', LIMB_SCALE);
+  if (lastFrame) applyPoseToVrm(lastFrame);
+};
 
 
 

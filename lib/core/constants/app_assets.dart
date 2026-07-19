@@ -28,6 +28,9 @@ class AppAssets {
   /// Guide model — local Flutter asset only (no HTTPS / CDN).
   static const String yogaAvatarVrm = 'assets/models/yoga_avatar.vrm';
 
+  /// Optional Rive mannequin (feature/rive-mannequin-guide). Designer drops file here.
+  static const String yogaMannequinRive = 'assets/rive/yoga_mannequin.riv';
+
   static const String vrmRendererHtml = 'assets/web/yoga_vrm_renderer.html';
 
   /// Offline esbuild bundle (three + three-vrm + kalidokit + renderer).

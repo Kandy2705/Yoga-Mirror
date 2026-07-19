@@ -1,0 +1,22 @@
+YogaMirror — Rive mannequin guide (designer handoff)
+====================================================
+
+Target file (drop here):
+  assets/rive/yoga_mannequin.riv
+
+Visual contract (must match; do not invent):
+  - Human mannequin form only
+  - NO eyes, nose, mouth, facial detail
+  - Smooth surface, single solid color (suggest #B8B0C8 or flat grey-lavender)
+  - Standing straight idle by default
+  - Minimal: no clothes, hair, props
+
+Rive naming (app binds these):
+  Artboard:        Mannequin
+  State machine:   Guide
+  Default pose:    idle_stand
+
+Dev will only bind artboard / state machine / optional inputs.
+Do NOT require JSON landmark driving for the first ship.
+
+After adding the file, run a full Flutter rebuild so the asset is bundled.
