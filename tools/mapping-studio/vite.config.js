@@ -3,8 +3,8 @@ import { fileURLToPath } from 'node:url';
 import { defineConfig } from 'vite';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-// Repo assets are stored as `Assets/`; URLs may still use /assets for compatibility.
-const assetsRoot = path.resolve(__dirname, '../../Assets');
+// Repo assets are stored under lowercase `assets/`; serve only /assets URLs.
+const assetsRoot = path.resolve(__dirname, '../../assets');
 
 export default defineConfig({
   root: __dirname,
@@ -15,7 +15,7 @@ export default defineConfig({
       allow: [path.resolve(__dirname, '../..')],
     },
   },
-  // Serve project assets under both /Assets and /assets
+  // Serve project assets under /assets
   publicDir: false,
   plugins: [
     {
@@ -23,10 +23,10 @@ export default defineConfig({
       configureServer(server) {
         server.middlewares.use((req, res, next) => {
           const url = req.url?.split('?')[0] || '';
-          if (!url.startsWith('/Assets/') && !url.startsWith('/assets/')) {
+          if (!url.startsWith('/assets/')) {
             return next();
           }
-          const rel = decodeURIComponent(url.replace(/^\/[Aa]ssets\//, ''));
+          const rel = decodeURIComponent(url.replace(/^\/assets\//, ''));
           const filePath = path.join(assetsRoot, rel);
           if (!filePath.startsWith(assetsRoot)) {
             res.statusCode = 403;

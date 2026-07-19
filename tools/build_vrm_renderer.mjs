@@ -5,8 +5,8 @@ import { fileURLToPath } from 'node:url';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const root = path.join(__dirname, '..');
-const entry = path.join(root, 'Assets/web/yoga_vrm_renderer.js');
-const outfile = path.join(root, 'Assets/web/yoga_vrm_renderer.bundle.js');
+const entry = path.join(root, 'assets/web/yoga_vrm_renderer.js');
+const outfile = path.join(root, 'assets/web/yoga_vrm_renderer.bundle.js');
 
 await esbuild.build({
   entryPoints: [entry],

@@ -30834,7 +30834,7 @@
   };
   FaceSolver.stabilizeBlink = stabilizeBlink;
 
-  // Assets/web/yoga_vrm_renderer.js
+  // assets/web/yoga_vrm_renderer.js
   var enableRetarget = false;
   var mirrorGuide = false;
   var retargetParts = { torso: true, arms: true, legs: true };
