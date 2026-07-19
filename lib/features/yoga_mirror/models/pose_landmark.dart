@@ -59,7 +59,7 @@ class PoseLandmark {
         'presence': presence,
       };
 
-  /// Normalized 0–1; fallback sang pixel / frame size.
+  
   double normalizedX(double frameWidth) =>
       xNorm ?? (frameWidth > 0 ? x / frameWidth : x);
 

@@ -31016,20 +31016,26 @@
   };
   var BONE_LANDMARK_MAP = {
     head: "nose",
-    // Arms (VRM left ← MP right, VRM right ← MP left)
-    leftUpperArm: "rightShoulder",
-    leftLowerArm: "rightElbow",
-    leftHand: "rightWrist",
-    rightUpperArm: "leftShoulder",
-    rightLowerArm: "leftElbow",
-    rightHand: "leftWrist",
-    // Legs
-    leftUpperLeg: "rightHip",
-    leftLowerLeg: "rightKnee",
-    leftFoot: "rightAnkle",
-    rightUpperLeg: "leftHip",
-    rightLowerLeg: "leftKnee",
-    rightFoot: "leftAnkle"
+    leftUpperArm: "leftShoulder",
+    leftLowerArm: "leftElbow",
+    leftHand: "leftWrist",
+    rightUpperArm: "rightShoulder",
+    rightLowerArm: "rightElbow",
+    rightHand: "rightWrist",
+    leftThumbProximal: "leftThumb",
+    leftIndexProximal: "leftIndex",
+    leftIndexDistal: "leftPinky",
+    rightThumbProximal: "rightThumb",
+    rightIndexProximal: "rightIndex",
+    rightIndexDistal: "rightPinky",
+    leftUpperLeg: "leftHip",
+    leftLowerLeg: "leftKnee",
+    leftFoot: "leftAnkle",
+    leftToes: "leftFootIndex",
+    rightUpperLeg: "rightHip",
+    rightLowerLeg: "rightKnee",
+    rightFoot: "rightAnkle",
+    rightToes: "rightFootIndex"
   };
   function landmarkIndexForBone(boneName) {
     const lmName = BONE_LANDMARK_MAP[boneName];
@@ -31481,21 +31487,18 @@
   }
   var JSON_DEBUG_CORE_INDICES = /* @__PURE__ */ new Set([
     0,
-    // nose
     11,
     12,
     13,
     14,
     15,
     16,
-    // shoulders, elbows, wrists
     23,
     24,
     25,
     26,
     27,
     28
-    // hips, knees, ankles
   ]);
   function isCoreJsonLandmark(lm) {
     const idx = lm.index != null ? lm.index : Object.prototype.hasOwnProperty.call(LANDMARK, lm.name) ? LANDMARK[lm.name] : null;
@@ -31629,6 +31632,7 @@
     const s = getMappedLandmarkPoint(frame, upper);
     const e = getMappedLandmarkPoint(frame, lower);
     const w = getMappedLandmarkPoint(frame, hand);
+    const finger = getMappedLandmarkPoint(frame, prefix + "IndexProximal") || getMappedLandmarkPoint(frame, prefix + "ThumbProximal");
     if (s && e) {
       applyBoneDirectionChainByName(upper, s, e, restDir);
       vrm.scene.updateMatrixWorld(true);
@@ -31637,8 +31641,8 @@
       applyBoneDirectionChainByName(lower, e, w, restDir);
       vrm.scene.updateMatrixWorld(true);
     }
-    if (w && e) {
-      applyBoneDirectionChainByName(hand, e, w, restDir, 0.5);
+    if (w && (finger || e)) {
+      applyBoneDirectionChainByName(hand, w, finger || e, restDir, 0.5);
       vrm.scene.updateMatrixWorld(true);
     }
   }
@@ -31648,10 +31652,12 @@
     const upper = prefix + "UpperLeg";
     const lower = prefix + "LowerLeg";
     const foot = prefix + "Foot";
+    const toes = prefix + "Toes";
     const down = new Vector3(0, -1, 0);
     const h = getMappedLandmarkPoint(frame, upper);
     const k = getMappedLandmarkPoint(frame, lower);
     const a = getMappedLandmarkPoint(frame, foot);
+    const t = getMappedLandmarkPoint(frame, toes);
     if (h && k) {
       applyBoneDirectionChainByName(upper, h, k, down);
       vrm.scene.updateMatrixWorld(true);
@@ -31660,8 +31666,12 @@
       applyBoneDirectionChainByName(lower, k, a, down);
       vrm.scene.updateMatrixWorld(true);
     }
-    if (a) {
+    if (a && (k || h)) {
       applyBoneDirectionChainByName(foot, k || h, a, down, 0.5);
+      vrm.scene.updateMatrixWorld(true);
+    }
+    if (a && t) {
+      applyBoneDirectionChainByName(toes, a, t, new Vector3(0, 0, -1), 0.4);
       vrm.scene.updateMatrixWorld(true);
     }
   }
@@ -31738,75 +31748,6 @@
     LeftLowerLeg: "leftLowerLeg",
     RightLowerLeg: "rightLowerLeg"
   };
-  function landmarkToPlanarPoint(lm) {
-    if (!lm || lm.xNorm == null || lm.yNorm == null) return null;
-    return new Vector3(
-      ((lm.xNorm ?? 0.5) - 0.5) * 1.5,
-      -((lm.yNorm ?? 0.5) - 0.5) * 1.5,
-      0
-    );
-  }
-  function midpointPlanar(a, b) {
-    const pa = landmarkToPlanarPoint(a);
-    const pb = landmarkToPlanarPoint(b);
-    return midpoint(pa, pb);
-  }
-  function applyKalidoTorsoLeanOverride(frame) {
-    if (!vrm || !retargetParts.torso) return;
-    const ls = getLandmark(frame, LANDMARK.leftShoulder);
-    const rs = getLandmark(frame, LANDMARK.rightShoulder);
-    const lh = getLandmark(frame, LANDMARK.leftHip);
-    const rh = getLandmark(frame, LANDMARK.rightHip);
-    const noseLm = getLandmark(frame, LANDMARK.nose);
-    if (!ls || !rs || !lh || !rh) return;
-    const shoulderCenter2d = midpointPlanar(ls, rs);
-    const hipCenter2d = midpointPlanar(lh, rh);
-    if (!shoulderCenter2d || !hipCenter2d) return;
-    const torsoDir = shoulderCenter2d.clone().sub(hipCenter2d);
-    if (torsoDir.lengthSq() < 1e-5) return;
-    torsoDir.normalize();
-    const leanAngle = Math.acos(MathUtils.clamp(torsoDir.dot(new Vector3(0, 1, 0)), -1, 1));
-    if (leanAngle < MathUtils.degToRad(10)) return;
-    const torsoAlpha = MathUtils.clamp((leanAngle - MathUtils.degToRad(8)) / MathUtils.degToRad(45), 0.15, 0.65);
-    applyBoneDirectionChainByName("hips", hipCenter2d, shoulderCenter2d, new Vector3(0, 1, 0), torsoAlpha * 0.45);
-    vrm.scene.updateMatrixWorld(true);
-    applyBoneDirectionChainByName("spine", hipCenter2d, shoulderCenter2d, new Vector3(0, 1, 0), torsoAlpha * 0.75);
-    vrm.scene.updateMatrixWorld(true);
-    applyBoneDirectionChainByName("chest", hipCenter2d, shoulderCenter2d, new Vector3(0, 1, 0), torsoAlpha);
-    vrm.scene.updateMatrixWorld(true);
-    if (noseLm) {
-      const nose2d = landmarkToPlanarPoint(noseLm);
-      if (!nose2d) return;
-      applyBoneDirectionChainByName("neck", shoulderCenter2d, nose2d, new Vector3(0, 1, 0), torsoAlpha * 0.55);
-      vrm.scene.updateMatrixWorld(true);
-      applyBoneDirectionChainByName("head", shoulderCenter2d, nose2d, new Vector3(0, 1, 0), torsoAlpha * 0.45);
-      vrm.scene.updateMatrixWorld(true);
-    }
-  }
-  function applyKalidoPlanarLegOverride(frame) {
-    if (!vrm || !retargetParts.legs) return;
-    const applySide = (side, hipIndex, kneeIndex, ankleIndex) => {
-      const hip = landmarkToPlanarPoint(getLandmark(frame, hipIndex));
-      const knee = landmarkToPlanarPoint(getLandmark(frame, kneeIndex));
-      const ankle = landmarkToPlanarPoint(getLandmark(frame, ankleIndex));
-      if (!hip || !knee || !ankle) return;
-      const prefix = side === "left" ? "left" : "right";
-      const hipToKnee = knee.clone().sub(hip);
-      const kneeToAnkle = ankle.clone().sub(knee);
-      if (hipToKnee.lengthSq() < 1e-5 || kneeToAnkle.lengthSq() < 1e-5) return;
-      const upperAlpha = 0.85;
-      const lowerAlpha = 0.9;
-      const down = new Vector3(0, -1, 0);
-      applyBoneDirectionChainByName(prefix + "UpperLeg", hip, knee, down, upperAlpha);
-      vrm.scene.updateMatrixWorld(true);
-      applyBoneDirectionChainByName(prefix + "LowerLeg", knee, ankle, down, lowerAlpha);
-      vrm.scene.updateMatrixWorld(true);
-      applyBoneDirectionChainByName(prefix + "Foot", knee, ankle, down, 0.45);
-      vrm.scene.updateMatrixWorld(true);
-    };
-    applySide("left", LANDMARK.leftHip, LANDMARK.leftKnee, LANDMARK.leftAnkle);
-    applySide("right", LANDMARK.rightHip, LANDMARK.rightKnee, LANDMARK.rightAnkle);
-  }
   function applyKalidoPoseToVrm(riggedPose) {
     if (!vrm || !riggedPose) return false;
     const boneMap = KALIDOKIT_DIRECT_MAP;
@@ -31849,12 +31790,10 @@
         video: null,
         enableLegs: true
       });
-      if (riggedPose?.Hips) {
+      if (riggedPose?.Hips || riggedPose?.RightUpperArm) {
         poseBodyYaw = 0;
-        lastRetargetMode = "kalidokit";
+        lastRetargetMode = "kalidokit-only";
         applyKalidoPoseToVrm(riggedPose);
-        applyKalidoTorsoLeanOverride(frame);
-        applyKalidoPlanarLegOverride(frame);
         updateDepthHud(frame);
         return;
       }

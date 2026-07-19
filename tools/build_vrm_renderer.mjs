@@ -1,9 +1,4 @@
-/**
- * Bundle assets/web/yoga_vrm_renderer.js + npm deps into a single IIFE
- * so WKWebView/Android WebView can run fully offline (no CDN).
- *
- * Usage: npm run build:renderer
- */
+
 import * as esbuild from 'esbuild';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -21,9 +16,9 @@ await esbuild.build({
   target: ['es2020'],
   outfile,
   logLevel: 'info',
-  // Prefer ESM builds of three / three-vrm
+  
   mainFields: ['module', 'browser', 'main'],
-  // Keep console logs for device debugging
+  
   drop: [],
   legalComments: 'none',
 });

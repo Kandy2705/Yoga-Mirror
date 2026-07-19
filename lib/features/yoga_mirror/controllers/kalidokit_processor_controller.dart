@@ -10,21 +10,21 @@ import '../../../core/constants/app_assets.dart';
 import '../models/pose_frame.dart';
 import '../utils/pose_frame_serializer.dart';
 
-/// RAW Kalidokit poseRig — góc Euler (radians) cho từng bone.
-///
-/// Keys (convention Kalidokit, **không** swap ở đây):
-///   RightUpperArm / LeftUpperArm / RightLowerArm / LeftLowerArm
-///   RightHand / LeftHand
-///   RightUpperLeg / LeftUpperLeg / RightLowerLeg / LeftLowerLeg
-///   Hips: { position, rotation, worldPosition }
-///   Spine: {x,y,z}
-///
-/// Dart **không** chứa vector/quaternion. Bạn tự gán poseRig → xương VRM.
+
+
+
+
+
+
+
+
+
+
 class KalidokitRawResult {
   final int timestampMs;
   final Map<String, dynamic> poseRig;
 
-  /// `mediapipe_world` | `screen_pseudo_world`
+  
   final String coordMode;
   final List<String> coordNotes;
 
@@ -47,7 +47,7 @@ class KalidokitRawResult {
     );
   }
 
-  /// Helper: lấy Euler {x,y,z} của 1 bone key (null nếu thiếu).
+  
   Map<String, double>? eulerOf(String key) {
     final raw = poseRig[key];
     if (raw is! Map) return null;
@@ -59,16 +59,16 @@ class KalidokitRawResult {
   }
 }
 
-/// Hidden WebView chạy Kalidokit solver (JS-only kinematics).
-///
-/// ## Dart chỉ làm 3 việc:
-/// 1. Load `kalidokit_solver.html` + inject `kalidokit.umd.js` (offline)
-/// 2. Gửi frame JSON: `processPose(...)`
-/// 3. Nhận RAW poseRig qua JavaScriptChannel `PoseChannel`
-///
-/// ## Không làm:
-/// - Tính vector / quaternion / world→local
-/// - Map tên xương VRM / swap L-R
+
+
+
+
+
+
+
+
+
+
 class KalidokitProcessorController {
   KalidokitProcessorController({this.onReady, this.onPoseSolved, this.onError});
 
@@ -85,7 +85,7 @@ class KalidokitProcessorController {
   bool get isReady => _isReady;
   bool get isProcessing => _isProcessing;
 
-  // ─── Bước 1: Load solver HTML (offline) ────────────────────────────
+  
 
   Future<void> initialize() async {
     try {
@@ -119,7 +119,7 @@ class KalidokitProcessorController {
     }
   }
 
-  /// Inject kalidokit UMD vào placeholder — giống pattern VRM renderer offline.
+  
   Future<String> _buildSolverHtml() async {
     final html = await rootBundle.loadString(AppAssets.kalidokitSolverHtml);
     final umd = await rootBundle.loadString(AppAssets.kalidokitUmdJs);
@@ -129,7 +129,7 @@ class KalidokitProcessorController {
     );
   }
 
-  // ─── Bước 3: Nhận kết quả ─────────────────────────────────────────
+  
 
   void _onMessage(JavaScriptMessage msg) {
     try {
@@ -145,7 +145,7 @@ class KalidokitProcessorController {
         case 'pose_solved':
           final result = KalidokitRawResult.fromJson(data);
           if (result.coordMode == 'screen_pseudo_world') {
-            // Log 1 lần kiểu — tránh spam; dùng debugPrint thưa.
+            
             debugPrint(
               '[KalidokitProcessor] frame ${result.timestampMs}ms '
               'coordMode=screen_pseudo_world (no wx/wy/wz — depth flat)',
@@ -160,7 +160,7 @@ class KalidokitProcessorController {
     }
   }
 
-  // ─── Bước 2: Gửi frame ────────────────────────────────────────────
+  
 
   Future<void> sendFrame(PoseFrame frame) async {
     if (!_isReady || _controller == null) return;
@@ -172,7 +172,7 @@ class KalidokitProcessorController {
     }
   }
 
-  /// Gửi raw JSON string (khi đã có string frame sẵn).
+  
   Future<void> sendFrameJson(String frameJson) async {
     if (!_isReady || _controller == null) return;
     try {
@@ -182,7 +182,7 @@ class KalidokitProcessorController {
     }
   }
 
-  /// Play list frames với timer
+  
   void playFrames(
     List<PoseFrame> frames, {
     double speed = 1.0,
@@ -226,7 +226,7 @@ class KalidokitProcessorController {
     return (total / (frames.length - 1)).round().clamp(16, 500);
   }
 
-  /// Widget 1×1 (invisible) — phải gắn vào tree để WebView chạy.
+  
   WebViewWidget? get widget {
     if (_controller == null) return null;
     return WebViewWidget(controller: _controller!);

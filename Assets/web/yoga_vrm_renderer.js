@@ -1,49 +1,49 @@
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { VRMLoaderPlugin, VRMUtils } from '@pixiv/three-vrm';
-// Static import so esbuild can offline-bundle (no CDN / dynamic network import).
+
 import * as Kalidokit from 'kalidokit';
 
-// ─── Config ─────────────────────────────────────────────────────────────────
+
 let enableRetarget = false;
-// Mirror is encoded in BONE_LANDMARK_MAP (VRM left ← JSON right). Do NOT also
-// swap bone names in getBone — that would double-mirror.
+
+
 let mirrorGuide = false;
 let retargetParts = { torso: true, arms: true, legs: true };
 const rotationSmoothing = 0.4;
-// ─── Guide display tuning ───────────────────────────────────────────────────
-// Uniform scale multiplier (on top of bbox normalize → ~1.8m).
+
+
 let guideModelScale = 0.7;
-// Non-uniform: height (Y) vs width/breadth (X). Depth (Z) follows average.
+
 let guideModelScaleY = 1.0;
 let guideModelScaleX = 1.0;
-let guideModelYOffset = 1;  // up/down (lower = model sits lower in frame)
-let guideModelZOffset = 0.0;   // toward/away camera
-// Face user (this VRM shows back at 0). Change only if facing wrong again.
-let guideModelYaw = Math.PI;   // radians around Y (π = 180°)
-// Retarget-driven whole-body yaw for planar/no-world fallback only.
+let guideModelYOffset = 1;  
+let guideModelZOffset = 0.0;   
+
+let guideModelYaw = Math.PI;   
+
 let poseBodyYaw = 0;
 let lastRetargetMode = 'idle';
-// If model leans too far FORWARD toward camera, try small NEGATIVE pitch
-// e.g. -0.08 … -0.15. If leans BACK, try small positive.
-let guideModelPitch = 0;    // radians around X (tilt)
-// Base scale from normalizeVrmModel (bbox → targetHeight). Re-applied with multipliers.
+
+
+let guideModelPitch = 0;    
+
 let baseNormalizeScale = 1;
-// Session-start body fit: lock after first successful manual/backend scale (mentor 2.2).
+
 let sessionScaleLocked = false;
 
-// Camera: eye-level toward model (not high bird's-eye).
-// Raise camY ≈ lookY for flatter view; lower lookY = look down more.
+
+
 const CAMERA_FOV = 35;
-const CAMERA_POS = { x: 0, y: 0.95, z: 2.7 };   // viewer height / distance
-const CAMERA_LOOK = { x: 0, y: 0.95, z: 0 };    // aim at mid/upper body (level)
+const CAMERA_POS = { x: 0, y: 0.95, z: 2.7 };   
+const CAMERA_LOOK = { x: 0, y: 0.95, z: 0 };    
 
 function applyModelScale() {
   if (!vrm?.scene) return;
   const u = baseNormalizeScale * guideModelScale;
   const sx = u * guideModelScaleX;
   const sy = u * guideModelScaleY;
-  // Depth: average of X/Y so silhouette does not look paper-thin or inflated.
+  
   const sz = u * ((guideModelScaleX + guideModelScaleY) * 0.5);
   vrm.scene.scale.set(sx, sy, sz);
   debugScaleFactor = sy;
@@ -52,16 +52,16 @@ function applyModelScale() {
 function applyGuideRootTransform() {
   if (!guideRoot) return;
   guideRoot.position.set(0, guideModelYOffset, guideModelZOffset);
-  // order YXZ: yaw then pitch feels natural for "stand and tip"
+  
   guideRoot.rotation.order = 'YXZ';
   guideRoot.rotation.set(guideModelPitch, guideModelYaw + poseBodyYaw, 0);
-  // Scale lives on vrm.scene (see applyModelScale) so setGuideTransform can
-  // change height/width without re-normalizing the mesh.
+  
+  
   guideRoot.scale.setScalar(1);
   applyModelScale();
 }
 
-// ─── Scene state ───────────────────────────────────────────────────────────
+
 const canvas = document.getElementById('canvas');
 const statusEl = document.getElementById('status');
 const clock = new THREE.Clock();
@@ -79,10 +79,10 @@ let boneHelper = null;
 let debugRecenterOffset = new THREE.Vector3();
 let debugScaleFactor = 1;
 const debugGroup = new THREE.Group();
-// ID label modes: 'off' | 'vrm' (mapping panel bones) | 'json' (MediaPipe) | 'all'
+
 let idLabelMode = 'off';
 
-// --- Bone mapping runtime state -------------------------------------------
+
 let boneMapping = {};
 let mappingMode = false;
 let mappingOverlay = null;
@@ -98,27 +98,29 @@ const LANDMARK = {
   leftAnkle: 27, rightAnkle: 28,
 };
 
-/**
- * Manual bone mapping from Bone Mapping Tool (user verified).
- * VRM bone name → JSON landmark name (proximal joint / end effector for that bone).
- * Pattern: model left driven by MediaPipe right (and vice versa) — face-camera mirror.
- */
+
 const BONE_LANDMARK_MAP = {
   head: 'nose',
-  // Arms (VRM left ← MP right, VRM right ← MP left)
-  leftUpperArm: 'rightShoulder',
-  leftLowerArm: 'rightElbow',
-  leftHand: 'rightWrist',
-  rightUpperArm: 'leftShoulder',
-  rightLowerArm: 'leftElbow',
-  rightHand: 'leftWrist',
-  // Legs
-  leftUpperLeg: 'rightHip',
-  leftLowerLeg: 'rightKnee',
-  leftFoot: 'rightAnkle',
-  rightUpperLeg: 'leftHip',
-  rightLowerLeg: 'leftKnee',
-  rightFoot: 'leftAnkle',
+  leftUpperArm: 'leftShoulder',
+  leftLowerArm: 'leftElbow',
+  leftHand: 'leftWrist',
+  rightUpperArm: 'rightShoulder',
+  rightLowerArm: 'rightElbow',
+  rightHand: 'rightWrist',
+  leftThumbProximal: 'leftThumb',
+  leftIndexProximal: 'leftIndex',
+  leftIndexDistal: 'leftPinky',
+  rightThumbProximal: 'rightThumb',
+  rightIndexProximal: 'rightIndex',
+  rightIndexDistal: 'rightPinky',
+  leftUpperLeg: 'leftHip',
+  leftLowerLeg: 'leftKnee',
+  leftFoot: 'leftAnkle',
+  leftToes: 'leftFootIndex',
+  rightUpperLeg: 'rightHip',
+  rightLowerLeg: 'rightKnee',
+  rightFoot: 'rightAnkle',
+  rightToes: 'rightFootIndex',
 };
 
 function landmarkIndexForBone(boneName) {
@@ -132,7 +134,7 @@ function getMappedLandmarkPoint(frame, boneName) {
   return idx != null ? getLandmarkPoint(frame, idx) : null;
 }
 
-// ─── Flutter bridge ─────────────────────────────────────────────────────────
+
 function postToFlutter(payload) {
   if (window.YogaMirrorBridge && window.YogaMirrorBridge.postMessage) {
     window.YogaMirrorBridge.postMessage(JSON.stringify(payload));
@@ -153,7 +155,7 @@ function sendError(message, detail) {
   postToFlutter({ type: 'error', message: message, detail: detail || '' });
 }
 
-// ─── Scene init ───────────────────────────────────────────────────────────────
+
 function initScene() {
   renderer = new THREE.WebGLRenderer({
     canvas, alpha: true, antialias: true, premultipliedAlpha: false,
@@ -178,7 +180,7 @@ function initScene() {
   window.addEventListener('resize', onResize);
   onResize();
   animate();
-  // Create mapping overlay UI (lightweight) for manual bone mapping
+  
   try { createMappingOverlay(); } catch (e) { console.warn('[YogaVRM] createMappingOverlay failed', e); }
 }
 
@@ -201,11 +203,11 @@ function animate() {
   renderer.render(scene, camera);
 }
 
-// ─── Model normalization ──────────────────────────────────────────────────────
+
 function normalizeVrmModel(vrmModel) {
   if (!vrmModel?.scene) throw new Error('normalizeVrmModel: vrm.scene missing');
 
-  // Force matrix update before bounds (safer after GPU re-init / large meshes)
+  
   vrmModel.scene.updateMatrixWorld(true);
 
   const box = new THREE.Box3().setFromObject(vrmModel.scene);
@@ -240,9 +242,9 @@ function normalizeVrmModel(vrmModel) {
     'guideScale', guideModelScale.toFixed(3));
 }
 
-// ─── VRM load ─────────────────────────────────────────────────────────────────
+
 function ensureRendererAlive() {
-  // WKWebView may idle-exit GPU process; recreate WebGL renderer only (keep scene).
+  
   let gl = null;
   try {
     gl = renderer ? renderer.getContext() : null;
@@ -255,7 +257,7 @@ function ensureRendererAlive() {
   console.warn('[YogaVRM] WebGL context lost — recreating renderer');
   try {
     if (renderer) renderer.dispose();
-  } catch (_) { /* ignore */ }
+  } catch (_) {  }
 
   if (!canvas) throw new Error('canvas element missing');
   renderer = new THREE.WebGLRenderer({
@@ -300,7 +302,7 @@ async function loadVrmFromBase64Internal(base64) {
     URL.revokeObjectURL(url);
 
     if (vrm) {
-      try { VRMUtils.deepDispose(vrm.scene); } catch (_) { /* ignore */ }
+      try { VRMUtils.deepDispose(vrm.scene); } catch (_) {  }
       if (guideRoot && scene) scene.remove(guideRoot);
     }
 
@@ -359,18 +361,8 @@ window.loadVrmFromBase64 = async function (base64) {
   await loadVrmFromBase64Internal(base64);
 };
 
-// ─── Guide transform (Flutter can call to adjust) ────────────────────────────
-/**
- * Manual / freeform scale & pose of the guide avatar.
- * Mentor option 2.1 — user tự scale / căn chỉnh.
- *
- * config:
- *  - scale: number       uniform multiplier (default 0.7)
- *  - scaleX / scaleY:    relative width / height multipliers (default 1)
- *  - yOffset / zOffset
- *  - yaw / pitch (rad)
- *  - force: bool         ignore sessionScaleLocked (manual UI always force)
- */
+
+
 window.setGuideTransform = function (config) {
   if (!config) return;
   if (sessionScaleLocked && !config.force) {
@@ -395,17 +387,7 @@ window.setGuideTransform = function (config) {
   return true;
 };
 
-/**
- * Mentor option 2.2 — backend (or app) trả height/width ratio một lần lúc bắt đầu.
- * After apply + lock, live camera frames must NOT re-scale.
- *
- * params:
- *  - heightScale: number  multiplies Y (e.g. userHeightM / 1.7)
- *  - widthScale: number   multiplies X (e.g. userShoulderWidth / modelShoulder)
- *  - scale: number        optional uniform base
- *  - yOffset / zOffset
- *  - lock: bool           default true — freeze for rest of session
- */
+
 window.applySessionBodyScale = function (params) {
   if (!params) return false;
   if (sessionScaleLocked && !params.force) {
@@ -415,7 +397,7 @@ window.applySessionBodyScale = function (params) {
   if (params.scale !== undefined) guideModelScale = Number(params.scale);
   if (params.heightScale !== undefined) guideModelScaleY = Number(params.heightScale);
   if (params.widthScale !== undefined) guideModelScaleX = Number(params.widthScale);
-  // aliases
+  
   if (params.scaleY !== undefined) guideModelScaleY = Number(params.scaleY);
   if (params.scaleX !== undefined) guideModelScaleX = Number(params.scaleX);
   if (params.yOffset !== undefined) guideModelYOffset = Number(params.yOffset);
@@ -437,11 +419,7 @@ window.applySessionBodyScale = function (params) {
   return true;
 };
 
-/**
- * Fit guide height/width to a user PoseFrame (landmarks) once.
- * Uses world coords if available, else screen-normalized bbox.
- * Call only at session start (or pass lock:false for preview).
- */
+
 window.fitGuideToUserFromFrame = function (frameJson, opts) {
   opts = opts || {};
   if (sessionScaleLocked && !opts.force) {
@@ -475,15 +453,15 @@ window.fitGuideToUserFromFrame = function (frameJson, opts) {
   const userWidth = pLS.distanceTo(pRS);
   if (userHeight < 1e-4 || userWidth < 1e-4) return false;
 
-  // Current VRM size after base normalize (before user multipliers)
+  
   vrm.scene.updateMatrixWorld(true);
-  // Temporarily reset multipliers to measure base body
+  
   const prevX = guideModelScaleX;
   const prevY = guideModelScaleY;
   const prevU = guideModelScale;
   guideModelScaleX = 1;
   guideModelScaleY = 1;
-  // keep guideModelScale so fit is relative to current uniform taste
+  
   applyModelScale();
   vrm.scene.updateMatrixWorld(true);
   const box = new THREE.Box3().setFromObject(vrm.scene);
@@ -495,10 +473,10 @@ window.fitGuideToUserFromFrame = function (frameJson, opts) {
 
   const modelH = Math.max(size.y, 1e-3);
   const modelW = Math.max(size.x, 1e-3);
-  // Ratios: how much to stretch base model to match user proportions
+  
   let heightScale = userHeight / modelH;
   let widthScale = userWidth / modelW;
-  // Clamp extreme outliers (bad depth / partial pose)
+  
   heightScale = Math.min(2.5, Math.max(0.35, heightScale));
   widthScale = Math.min(2.5, Math.max(0.35, widthScale));
 
@@ -551,7 +529,7 @@ window.setGuidePitch = function (pitch) {
   console.log('[YogaVRM] setGuidePitch', guideModelPitch);
 };
 
-// ─── Landmark helpers ─────────────────────────────────────────────────────────
+
 function isVisible(lm) {
   return lm && (lm.visibility ?? 1) > 0.5 && (lm.presence ?? 1) > 0.5;
 }
@@ -563,8 +541,8 @@ function getLandmark(frame, index) {
   return lm;
 }
 
-// MediaPipe world: Y-down → Three Y-up; depth +wz (as when pose mapping looked good).
-// No guideModelYaw here — yaw is display-only on guideRoot (slider).
+
+
 function hasFiniteNumber(value) {
   return typeof value === 'number' && Number.isFinite(value);
 }
@@ -582,8 +560,8 @@ function frameHasWorldLandmarks(frame) {
   return frameWorldLandmarkCount(frame) >= 10;
 }
 
-// Three.js/debug/custom space: MediaPipe world Y-down → Three Y-up. If world is
-// missing, stay strictly planar (z=0); never treat image-space z as metric depth.
+
+
 function toWorldPoint(lm) {
   if (!lm) return null;
   if (landmarkHasWorld(lm)) {
@@ -597,12 +575,7 @@ function toWorldPoint(lm) {
   return null;
 }
 
-/**
- * Align MediaPipe world skeleton onto current VRM body:
- *  - translate so MP hip-center → VRM hips bone
- *  - uniform scale so MP shoulder–hip length ≈ VRM shoulder–hip length
- * Result is in debugGroup local space (same parent as mesh under guideRoot).
- */
+
 function computeJsonDebugAlign(frame) {
   if (!frame?.landmarks?.length || !vrm?.humanoid || !guideRoot) return null;
 
@@ -649,23 +622,23 @@ function computeJsonDebugAlign(frame) {
   };
 }
 
-/** Map one MP landmark into debugGroup space, aligned to VRM when possible. */
+
 function toDebugPoint(lm, align) {
   const raw = toWorldPoint(lm);
   if (!raw) return null;
   if (align) {
-    // (p - mpHip) * scale + vrmHip
+    
     return raw.sub(align.mpHip).multiplyScalar(align.scale).add(align.vrmHip);
   }
-  // Fallback (no hips/shoulders in frame): old bbox heuristic
+  
   return raw.sub(debugRecenterOffset).multiplyScalar(debugScaleFactor);
 }
 
-/** Core landmarks for cleaner debug (nose + arms + hips/legs). */
+
 const JSON_DEBUG_CORE_INDICES = new Set([
-  0, // nose
-  11, 12, 13, 14, 15, 16, // shoulders, elbows, wrists
-  23, 24, 25, 26, 27, 28, // hips, knees, ankles
+  0, 
+  11, 12, 13, 14, 15, 16, 
+  23, 24, 25, 26, 27, 28, 
 ]);
 
 function isCoreJsonLandmark(lm) {
@@ -695,8 +668,8 @@ function getLandmarkPoint(frame, index) {
 
 function getBone(name) {
   if (!vrm?.humanoid) return null;
-  // Bone names are already the real VRM humanoid bones. L/R mirror lives in
-  // BONE_LANDMARK_MAP only (see applyArm / applyLeg). Optional legacy swap:
+  
+  
   if (mirrorGuide) {
     const swapMap = {
       'leftUpperArm': 'rightUpperArm', 'rightUpperArm': 'leftUpperArm',
@@ -731,30 +704,16 @@ window.runBoneSanityTest = function () {
   if (rightUpperArm) rightUpperArm.rotation.z = -0.8;
 };
 
-// ─── Bone chain: world→local conversion (top-down, parent→child) ────────────
+
 const _parentWorldQuat = new THREE.Quaternion();
 const _desiredWorldQuat = new THREE.Quaternion();
 const _stripYawQuat = new THREE.Quaternion();
 const _yawAxisY = new THREE.Vector3(0, 1, 0);
 
-/**
- * Why the yaw slider "snaps back" when Play/retarget runs:
- *
- * applyBoneDirectionChain does:
- *   localQuat = inverse(parent.worldQuaternion) * desiredWorldQuat
- *
- * parent of the chain includes guideRoot.yaw. For upright spine,
- * desiredWorldQuat ≈ identity (up→up), so
- *   localQuat ≈ inverse(yaw)
- * and the mesh world becomes yaw * inverse(yaw) ≈ identity — display spin is
- * cancelled every frame by hips retarget. That is the "force pulling back".
- *
- * Fix: strip guideModelYaw from parent.world when solving local quats so
- * retarget is independent of the display slider. guideRoot.yaw then sticks.
- */
+
 function getParentWorldQuatForRetarget(bone, outQuat) {
   bone.parent.getWorldQuaternion(outQuat);
-  // Strip full guideRoot rotation (yaw+pitch) so display tilt/spin never fights retarget.
+  
   if (guideRoot) {
     guideRoot.getWorldQuaternion(_stripYawQuat);
     outQuat.premultiply(_stripYawQuat.invert());
@@ -784,8 +743,8 @@ function applyBoneDirectionChainByName(boneName, from, to, defaultDir, alpha) {
   applyBoneDirectionChain(bone, from, to, defaultDir, alpha);
 }
 
-// ─── Torso (chain: hips → spine → chest → neck → head) ───────────────────────
-// Simple direction chain only — no hips twist/face "fix" (those twisted the whole body).
+
+
 function applyTorso(frame) {
   const ls = getLandmarkPoint(frame, LANDMARK.leftShoulder);
   const rs = getLandmarkPoint(frame, LANDMARK.rightShoulder);
@@ -814,8 +773,8 @@ function applyTorso(frame) {
   }
 }
 
-// ─── Arm (single side, chain: upperArm → lowerArm → hand) ─────────────────────
-// Landmarks from BONE_LANDMARK_MAP (user tool): VRM left ← MP right, etc.
+
+
 function applyArm(frame, side) {
   const isLeft = side === 'left';
   const prefix = isLeft ? 'left' : 'right';
@@ -823,12 +782,15 @@ function applyArm(frame, side) {
   const lower = prefix + 'LowerArm';
   const hand = prefix + 'Hand';
 
-  // Rest dir follows the *VRM bone side* (not the MP side).
   const restDir = isLeft ? new THREE.Vector3(-1, 0, 0) : new THREE.Vector3(1, 0, 0);
 
+  
   const s = getMappedLandmarkPoint(frame, upper);
   const e = getMappedLandmarkPoint(frame, lower);
   const w = getMappedLandmarkPoint(frame, hand);
+  const finger =
+    getMappedLandmarkPoint(frame, prefix + 'IndexProximal') ||
+    getMappedLandmarkPoint(frame, prefix + 'ThumbProximal');
 
   if (s && e) {
     applyBoneDirectionChainByName(upper, s, e, restDir);
@@ -838,24 +800,26 @@ function applyArm(frame, side) {
     applyBoneDirectionChainByName(lower, e, w, restDir);
     vrm.scene.updateMatrixWorld(true);
   }
-  if (w && e) {
-    applyBoneDirectionChainByName(hand, e, w, restDir, 0.5);
+  if (w && (finger || e)) {
+    applyBoneDirectionChainByName(hand, w, finger || e, restDir, 0.5);
     vrm.scene.updateMatrixWorld(true);
   }
 }
 
-// ─── Leg (single side, chain: upperLeg → lowerLeg → foot) ─────────────────────
+
 function applyLeg(frame, side) {
   const isLeft = side === 'left';
   const prefix = isLeft ? 'left' : 'right';
   const upper = prefix + 'UpperLeg';
   const lower = prefix + 'LowerLeg';
   const foot = prefix + 'Foot';
+  const toes = prefix + 'Toes';
   const down = new THREE.Vector3(0, -1, 0);
 
   const h = getMappedLandmarkPoint(frame, upper);
   const k = getMappedLandmarkPoint(frame, lower);
   const a = getMappedLandmarkPoint(frame, foot);
+  const t = getMappedLandmarkPoint(frame, toes);
 
   if (h && k) {
     applyBoneDirectionChainByName(upper, h, k, down);
@@ -865,13 +829,17 @@ function applyLeg(frame, side) {
     applyBoneDirectionChainByName(lower, k, a, down);
     vrm.scene.updateMatrixWorld(true);
   }
-  if (a) {
+  if (a && (k || h)) {
     applyBoneDirectionChainByName(foot, k || h, a, down, 0.5);
+    vrm.scene.updateMatrixWorld(true);
+  }
+  if (a && t) {
+    applyBoneDirectionChainByName(toes, a, t, new THREE.Vector3(0, 0, -1), 0.4);
     vrm.scene.updateMatrixWorld(true);
   }
 }
 
-// ─── Custom solver ────────────────────────────────────────────────────────────
+
 function computePlanarBodyYaw(frame) {
   const ls = getLandmark(frame, LANDMARK.leftShoulder);
   const rs = getLandmark(frame, LANDMARK.rightShoulder);
@@ -886,9 +854,9 @@ function computePlanarBodyYaw(frame) {
   const collapse = Math.max(0, Math.min(1, 1 - bodyWidth / normalWidth));
   if (collapse < 0.12) return 0;
 
-  // In custom_planar there is no trustworthy metric world depth, but 2D side
-  // view still needs whole-body yaw. Use image-z only as a left/right ordering
-  // hint (not as a 3D bone direction), then fall back to x-order handedness.
+  
+  
+  
   let yawSign = 0;
   const leftDepth = [ls.z, lh.z].filter(hasFiniteNumber);
   const rightDepth = [rs.z, rh.z].filter(hasFiniteNumber);
@@ -896,7 +864,7 @@ function computePlanarBodyYaw(frame) {
     const avg = (arr) => arr.reduce((sum, value) => sum + value, 0) / arr.length;
     const dz = avg(leftDepth) - avg(rightDepth);
     if (Math.abs(dz) > 0.015) {
-      // MediaPipe image z: smaller usually means closer to camera.
+      
       yawSign = dz < 0 ? -1 : 1;
     }
   }
@@ -918,10 +886,10 @@ function applyCustomPose(frame) {
   applyGuideRootTransform();
 }
 
-// ─── Kalidokit ────────────────────────────────────────────────────────────────
-// Build by index (0-32) — data thật có đủ 33 landmark theo index, không thiếu.
-// poseLandmarkArray: screen-space normalized, dùng cho ước lượng visibility/scale
-// poseWorld3DArray: world-space (mét), dùng để tính rotation — giữ raw wx/wy/wz
+
+
+
+
 function frameToKalidoKitInputs(frame) {
   const byIndex = new Array(33).fill(null);
   frame.landmarks.forEach(lm => { byIndex[lm.index] = lm; });
@@ -941,8 +909,8 @@ function frameToKalidoKitInputs(frame) {
   return { poseLandmarkArray, poseWorld3DArray };
 }
 
-// Matches BONE_LANDMARK_MAP: person right arm → VRM left arm (face-camera mirror).
-// Kalido Left* is anatomical left of the tracked body → drive VRM right* bones.
+
+
 const KALIDOKIT_MIRROR_MAP = {
   Hips: 'hips', Spine: 'spine', Chest: 'chest', Neck: 'neck', Head: 'head',
   LeftUpperArm: 'rightUpperArm', RightUpperArm: 'leftUpperArm',
@@ -978,10 +946,10 @@ function midpointPlanar(a, b) {
 function applyKalidoTorsoLeanOverride(frame) {
   if (!vrm || !retargetParts.torso) return;
 
-  // Kalidokit is good for twist/yaw, but in deep side-view forward folds it can
-  // under-drive the avatar torso. Add a conservative silhouette lean from the
-  // hip→shoulder line, keeping it planar (z=0) so we do not reintroduce 3D
-  // corkscrew from world depth.
+  
+  
+  
+  
   const ls = getLandmark(frame, LANDMARK.leftShoulder);
   const rs = getLandmark(frame, LANDMARK.rightShoulder);
   const lh = getLandmark(frame, LANDMARK.leftHip);
@@ -1020,11 +988,11 @@ function applyKalidoTorsoLeanOverride(frame) {
 function applyKalidoPlanarLegOverride(frame) {
   if (!vrm || !retargetParts.legs) return;
 
-  // A VRM skeleton cannot translate a knee node onto a MediaPipe dot without
-  // stretching the mesh. The safe approximation is IK-like: rotate thigh/shin
-  // toward the hip→knee and knee→ankle silhouette segments using fixed bone
-  // lengths. This pulls the rendered knees toward the blue debug knees without
-  // assigning bone.position from landmarks.
+  
+  
+  
+  
+  
   const applySide = (side, hipIndex, kneeIndex, ankleIndex) => {
     const hip = landmarkToPlanarPoint(getLandmark(frame, hipIndex));
     const knee = landmarkToPlanarPoint(getLandmark(frame, kneeIndex));
@@ -1036,8 +1004,8 @@ function applyKalidoPlanarLegOverride(frame) {
     const kneeToAnkle = ankle.clone().sub(knee);
     if (hipToKnee.lengthSq() < 1e-5 || kneeToAnkle.lengthSq() < 1e-5) return;
 
-    // Stronger than generic smoothing because this is a post-Kalidokit correction
-    // for side-view knee placement, but still below 1.0 to avoid frame jitter.
+    
+    
     const upperAlpha = 0.85;
     const lowerAlpha = 0.9;
     const down = new THREE.Vector3(0, -1, 0);
@@ -1055,8 +1023,8 @@ function applyKalidoPlanarLegOverride(frame) {
 
 function applyKalidoPoseToVrm(riggedPose) {
   if (!vrm || !riggedPose) return false;
-  // Use the official/direct Kalidokit → VRM humanoid mapping. Avoid stacking a
-  // mirror map with guideRoot display yaw, which previously encouraged twisting.
+  
+  
   const boneMap = KALIDOKIT_DIRECT_MAP;
 
   for (const [kalidoKey, vrmBone] of Object.entries(boneMap)) {
@@ -1091,7 +1059,7 @@ function applyKalidoPoseToVrm(riggedPose) {
   return true;
 }
 
-// ─── Main retarget pipeline ───────────────────────────────────────────────────
+
 function applyPoseToVrm(frame) {
   if (!vrm || !enableRetarget) return;
   if (!isValidFrame(frame)) return;
@@ -1104,12 +1072,12 @@ function applyPoseToVrm(frame) {
       video: null,
       enableLegs: true,
     });
-    if (riggedPose?.Hips) {
+    if (riggedPose?.Hips || riggedPose?.RightUpperArm) {
+      
+      
       poseBodyYaw = 0;
-      lastRetargetMode = 'kalidokit';
+      lastRetargetMode = 'kalidokit-only';
       applyKalidoPoseToVrm(riggedPose);
-      applyKalidoTorsoLeanOverride(frame);
-      applyKalidoPlanarLegOverride(frame);
       updateDepthHud(frame);
       return;
     }
@@ -1135,7 +1103,7 @@ function updateDepthHud(frame) {
   statusEl.style.display = 'block';
 }
 
-// ─── Global API (Flutter gọi qua runJavaScript) ───────────────────────────────
+
 window.applyPoseFrame = function (frameJson) {
   try {
     const frame = typeof frameJson === 'string' ? JSON.parse(frameJson) : frameJson;
@@ -1177,7 +1145,7 @@ window.setPlaybackState = function (playing) {
   isPlaying = !!playing;
 };
 
-// ─── Debug skeleton ────────────────────────────────────────────────────────────
+
 function addBoneHelper() {
   if (boneHelper) {
     scene.remove(boneHelper);
@@ -1240,14 +1208,14 @@ const DEBUG_LANDMARK_COLORS = {
   leftAnkle: 0x0066ff, rightAnkle: 0x0066ff,
 };
 
-// Cache canvas textures for id labels (reused across frames).
-// key = `${colorHex}|${text}`
+
+
 const _debugLabelTexCache = new Map();
 
 function disposeDebugObject(obj) {
   if (obj.geometry) obj.geometry.dispose();
   if (obj.material) {
-    // Don't dispose cached label textures — they live in _debugLabelTexCache.
+    
     if (obj.userData && obj.userData.isDebugLabel) {
       obj.material.dispose();
     } else {
@@ -1271,11 +1239,7 @@ function ensureDebugGroupParented() {
   }
 }
 
-/**
- * Sprite label next to a point.
- * @param {string|number} idText
- * @param {string} colorCss e.g. '#7FDBFF' (JSON) or '#B388FF' (VRM/modal)
- */
+
 function makeDebugIdLabel(idText, colorCss = '#7FDBFF') {
   const text = String(idText);
   const cacheKey = colorCss + '|' + text;
@@ -1327,12 +1291,12 @@ function showVrmIds() {
   return idLabelMode === 'vrm' || idLabelMode === 'all';
 }
 
-/** Draw JSON MediaPipe landmark dots + optional id labels (aligned to VRM). */
+
 function addJsonLandmarkVisuals(frame) {
   if (!frame || !frame.landmarks) return;
 
   const align = computeJsonDebugAlign(frame);
-  // Core-only when showing id labels or always for cleaner overlay
+  
   const useCoreOnly = showJsonIds() || idLabelMode === 'all' || debugSkeletonEnabled;
   const landmarks = useCoreOnly
     ? frame.landmarks.filter(isCoreJsonLandmark)
@@ -1343,7 +1307,7 @@ function addJsonLandmarkVisuals(frame) {
     if (lm.name) byName[lm.name] = toDebugPoint(lm, align);
   });
 
-  // Lines only when full debug skeleton is on
+  
   if (debugSkeletonEnabled) {
     const linePts = [];
     for (const conn of DEBUG_CONNECTIONS) {
@@ -1384,7 +1348,7 @@ function addJsonLandmarkVisuals(frame) {
         ? lm.index
         : (Object.prototype.hasOwnProperty.call(LANDMARK, lm.name) ? LANDMARK[lm.name] : null);
       if (mpId != null) {
-        // Prefix J when "all" so không nhầm với id bone VRM
+        
         const text = idLabelMode === 'all' ? ('J' + mpId) : String(mpId);
         const label = makeDebugIdLabel(text, '#7FDBFF');
         label.position.set(pt.x + 0.06, pt.y + 0.05, pt.z);
@@ -1394,11 +1358,11 @@ function addJsonLandmarkVisuals(frame) {
   }
 }
 
-/** Draw VRM humanoid bone dots + id labels (same ids as mapping panel list). */
+
 function addVrmBoneIdVisuals() {
   if (!showVrmIds() || !vrm || !vrm.humanoid || !guideRoot) return;
 
-  // VRM_BONE_NAMES defined later in this module; available at runtime.
+  
   const names = (typeof VRM_BONE_NAMES !== 'undefined' && VRM_BONE_NAMES)
     ? VRM_BONE_NAMES
     : [
@@ -1415,12 +1379,12 @@ function addVrmBoneIdVisuals() {
 
   for (let i = 0; i < names.length; i++) {
     const name = names[i];
-    // Use raw bone node (no mirror swap) — label the actual mesh bone
+    
     const bone = vrm.humanoid.getNormalizedBoneNode(name);
     if (!bone) continue;
 
     bone.getWorldPosition(worldPos);
-    // Convert into debugGroup local space (debugGroup under guideRoot)
+    
     debugGroup.worldToLocal(worldPos);
 
     const mat = new THREE.MeshBasicMaterial({
@@ -1434,7 +1398,7 @@ function addVrmBoneIdVisuals() {
     mesh.renderOrder = 998;
     debugGroup.add(mesh);
 
-    // Prefix B when "all" so không nhầm với MediaPipe index
+    
     const text = idLabelMode === 'all' ? ('B' + i) : String(i);
     const label = makeDebugIdLabel(text, '#B388FF');
     label.position.set(worldPos.x + 0.06, worldPos.y + 0.05, worldPos.z);
@@ -1450,7 +1414,7 @@ function updateDebugVisuals(frame) {
   }
 
   ensureDebugGroupParented();
-  // Need up-to-date matrices before worldToLocal for VRM labels
+  
   if (guideRoot) guideRoot.updateMatrixWorld(true);
   clearDebugGroup();
 
@@ -1460,12 +1424,12 @@ function updateDebugVisuals(frame) {
   addVrmBoneIdVisuals();
 }
 
-// Back-compat alias
+
 function updateDebugSkeleton(frame) {
   updateDebugVisuals(frame);
 }
 
-/** Cycle / set id label mode. mode: 'off'|'vrm'|'json'|'all' */
+
 window.setIdLabelMode = function (mode) {
   const allowed = ['off', 'vrm', 'json', 'all'];
   idLabelMode = allowed.includes(mode) ? mode : 'off';
@@ -1489,7 +1453,7 @@ window.cycleIdLabelMode = function () {
 window.getIdLabelMode = function () {
   return idLabelMode;
 };
-// -------------------- Mapping UI & helpers ---------------------------------
+
 function _saveMapping() {
   try { localStorage.setItem('yogamirror_bone_mapping', JSON.stringify(boneMapping)); } catch (e) { }
 }
@@ -1516,7 +1480,7 @@ function updateMappingList() {
 function createMappingOverlay() {
   if (mappingOverlay) return;
   _loadMapping();
-  // small toggle button (minimized) to avoid blocking UI; draggable
+  
   const toggle = document.createElement('div');
   toggle.style.position = 'fixed';
   toggle.style.right = '12px';
@@ -1533,26 +1497,26 @@ function createMappingOverlay() {
   toggle.style.color = '#111';
   toggle.style.cursor = 'pointer';
   toggle.title = 'Bone mapping';
-    // Do not append the JS 'M' toggle button (UI is controlled from Flutter)
-    // const toggle = document.createElement('div');
-    // toggle.style.position = 'fixed';
-    // toggle.style.right = '12px';
-    // toggle.style.top = '12px';
-    // toggle.style.zIndex = 9999;
-    // toggle.style.width = '44px';
-    // toggle.style.height = '44px';
-    // toggle.style.borderRadius = '22px';
-    // toggle.style.background = 'linear-gradient(135deg,#b388ff,#ff66ff)';
-    // toggle.style.boxShadow = '0 4px 12px rgba(0,0,0,0.5)';
-    // toggle.style.display = 'flex';
-    // toggle.style.alignItems = 'center';
-    // toggle.style.justifyContent = 'center';
-    // toggle.style.color = '#111';
-    // toggle.style.cursor = 'pointer';
-    // toggle.title = 'Bone mapping';
-    // toggle.textContent = 'M';
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
 
-  // Enter/Exit mapping button
+  
   const btn = document.createElement('button');
   btn.textContent = mappingMode ? 'Exit mapping' : 'Map';
   btn.style.marginRight = '8px';
@@ -1566,7 +1530,7 @@ function createMappingOverlay() {
   _mappingButton = btn;
   mappingOverlay.appendChild(btn);
 
-  // Export button
+  
   const exportBtn = document.createElement('button');
   exportBtn.textContent = 'Export';
   exportBtn.title = 'Export mapping to console';
@@ -1577,7 +1541,7 @@ function createMappingOverlay() {
   exportBtn.onclick = () => { console.log('YogaMirror boneMapping:', JSON.stringify(boneMapping)); };
   mappingOverlay.appendChild(exportBtn);
 
-  // Clear button
+  
   const clearBtn = document.createElement('button');
   clearBtn.textContent = 'Clear';
   clearBtn.style.cursor = 'pointer';
@@ -1586,7 +1550,7 @@ function createMappingOverlay() {
   clearBtn.onclick = () => { boneMapping = {}; _saveMapping(); updateMappingList(); };
   mappingOverlay.appendChild(clearBtn);
 
-  // (optional) small mapping summary icon
+  
   const list = document.createElement('div');
   list.className = 'mapping-list';
   list.style.display = 'none';
@@ -1599,11 +1563,11 @@ function createMappingOverlay() {
   document.body.appendChild(mappingOverlay);
   updateMappingList();
   let hideTimer = null;
-  // hide panel after export/clear to avoid staying on-screen
+  
   exportBtn.addEventListener('click', () => { mappingOverlay.style.display = 'none'; if (hideTimer) { clearTimeout(hideTimer); hideTimer = null; } });
   clearBtn.addEventListener('click', () => { mappingOverlay.style.display = 'none'; if (hideTimer) { clearTimeout(hideTimer); hideTimer = null; } });
 
-  // Place toggle in header if page has one; otherwise attach to bottom-right near controls.
+  
   const existingHeader = document.querySelector('header');
   if (existingHeader) {
     toggle.style.position = 'relative';
@@ -1613,7 +1577,7 @@ function createMappingOverlay() {
     toggle.style.zIndex = 10002;
     existingHeader.appendChild(toggle);
   } else {
-    // attach toggle next to bottom-right (above mappingOverlay)
+    
     toggle.style.position = 'fixed';
     toggle.style.right = '12px';
     toggle.style.bottom = '48px';
@@ -1621,7 +1585,7 @@ function createMappingOverlay() {
     document.body.appendChild(toggle);
   }
 
-  // Simple click briefly shows the mapping panel then auto-hides so it doesn't block camera
+  
   toggle.addEventListener('click', (ev) => {
     const visible = mappingOverlay.style.display !== 'none' && mappingOverlay.style.display !== '';
     if (!visible) {
@@ -1634,7 +1598,7 @@ function createMappingOverlay() {
     }
   });
 
-  // canvas click mapping handler
+  
   canvas.addEventListener('click', (ev) => {
     if (!mappingMode) return;
     if (!lastFrame) return;
@@ -1668,7 +1632,7 @@ function createMappingOverlay() {
   });
 }
 
-// Expose simple API for Flutter/console
+
 window.getBoneMapping = function () { return boneMapping; };
 window.setBoneMapping = function (obj) { boneMapping = obj || {}; _saveMapping(); updateMappingList(); };
 window.enterMappingMode = function () { mappingMode = true; if (_mappingButton) _mappingButton.textContent = 'Exit mapping'; };
@@ -1714,11 +1678,11 @@ window.getDebugInfo = function () {
   return JSON.stringify(info);
 };
 
-// ─── Manual Bone Mapping Tool ────────────────────────────────────────────────
-// Pair VRM bones ↔ JSON landmarks via two text lists (no 3D hit-test).
-// IDs shown on UI:
-//   - VRM bone: list index (stable in this tool)
-//   - JSON landmark: MediaPipe Pose landmark index (LANDMARK map)
+
+
+
+
+
 const VRM_BONE_NAMES = [
   'hips', 'spine', 'chest', 'upperChest', 'neck', 'head',
   'leftShoulder', 'rightShoulder',
@@ -1738,13 +1702,13 @@ const JSON_LANDMARK_NAMES = [
   'leftAnkle', 'rightAnkle',
 ];
 
-/** VRM bone name → stable tool id (index in VRM_BONE_NAMES). */
+
 function vrmBoneId(name) {
   const i = VRM_BONE_NAMES.indexOf(name);
   return i >= 0 ? i : null;
 }
 
-/** JSON landmark name → MediaPipe index from LANDMARK. */
+
 function jsonLandmarkId(name) {
   return Object.prototype.hasOwnProperty.call(LANDMARK, name) ? LANDMARK[name] : null;
 }
@@ -1759,7 +1723,7 @@ function formatJsonLandmarkLabel(name) {
   return id !== null ? `[${id}] ${name}` : name;
 }
 
-let manualMapping = {}; // { vrmBoneName: jsonLandmarkName }
+let manualMapping = {}; 
 let mappingToolEl = null;
 let selectedBoneName = null;
 
@@ -1839,7 +1803,7 @@ function buildMappingToolUI() {
   saveBtn.textContent = 'Save (log console)';
   saveBtn.style.cssText = mappingButtonStyle() + 'background:#B388FF;color:#000;font-weight:700;';
   saveBtn.onclick = () => {
-    // Rich export: names + ids so you can map by eye / paste into notes
+    
     const detailed = {};
     for (const [bone, landmark] of Object.entries(manualMapping)) {
       detailed[bone] = {
@@ -1888,6 +1852,6 @@ window.setMappingToolEnabled = function (enable) {
   mappingToolEl.style.display = enable ? 'block' : 'none';
 };
 
-// ─── Boot ─────────────────────────────────────────────────────────────────────
+
 initScene();
 postToFlutter({ type: 'webview_ready' });

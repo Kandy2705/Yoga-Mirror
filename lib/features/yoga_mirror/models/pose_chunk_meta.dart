@@ -1,4 +1,4 @@
-/// Manifest for lazy-loaded pose JSON chunks (see tools/split_pose_json.py).
+
 class PoseChunkMeta {
   const PoseChunkMeta({
     required this.frameCount,
@@ -39,7 +39,7 @@ class PoseChunkMeta {
     );
   }
 
-  /// Index of chunk covering [timeMs], or last chunk if past end.
+  
   int chunkIndexForTime(int timeMs) {
     if (chunks.isEmpty) return 0;
     if (timeMs <= chunks.first.startTimestampMs) return chunks.first.index;
@@ -48,7 +48,7 @@ class PoseChunkMeta {
       if (timeMs >= c.startTimestampMs && timeMs <= c.endTimestampMs) {
         return c.index;
       }
-      // Gaps between chunks: pick the next one that starts after time.
+      
       if (timeMs < c.startTimestampMs) return c.index;
     }
     return chunks.last.index;

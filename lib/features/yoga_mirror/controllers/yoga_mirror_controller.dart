@@ -29,7 +29,7 @@ class YogaMirrorController extends ChangeNotifier {
 
   PoseCapture? capture;
 
-  /// All **loaded** frames so far (sorted by timestamp). Grows as chunks arrive.
+  
   List<PoseFrame> frames = [];
   int durationMs = 0;
   int startTimestampMs = 0;
@@ -42,7 +42,7 @@ class YogaMirrorController extends ChangeNotifier {
   List<String> feedback = ['Đang tải mẫu động tác...'];
   bool isLoading = true;
 
-  /// True while more pose chunks still loading in background.
+  
   bool isBufferingChunks = false;
   String? loadError;
   bool userDetected = false;
@@ -62,7 +62,7 @@ class YogaMirrorController extends ChangeNotifier {
     return '--';
   }
 
-  /// Default: chunked meta (fast first paint). Falls back to monolith JSON path.
+  
   Future<void> initialize({
     String assetPath = AppAssets.defaultPoseMeta,
   }) async {
@@ -119,10 +119,10 @@ class YogaMirrorController extends ChangeNotifier {
       capture: meta.capture,
       device: meta.device,
       captureParams: meta.captureParams,
-      frames: const [], // filled lazily into [frames]
+      frames: const [], 
     );
 
-    // First chunk only — unblocks UI (~300–400KB parse).
+    
     await _loadChunkIndex(0);
     if (frames.isNotEmpty) {
       currentSampleFrame = frames.first;
@@ -131,7 +131,7 @@ class YogaMirrorController extends ChangeNotifier {
       currentTimeMs = startTimestampMs;
     }
 
-    // Rest of timeline in background (does not block isLoading).
+    
     isBufferingChunks = meta.chunks.length > 1;
     unawaited(_preloadRemainingChunks());
   }
@@ -184,7 +184,7 @@ class YogaMirrorController extends ChangeNotifier {
     _loadedChunkIndices.add(index);
     if (chunkFrames.isEmpty) return;
 
-    // Merge into sorted timeline (append-fast path when loading in order).
+    
     if (frames.isEmpty) {
       frames = List<PoseFrame>.from(chunkFrames);
     } else if (chunkFrames.first.timestampMs >= frames.last.timestampMs) {
@@ -196,7 +196,7 @@ class YogaMirrorController extends ChangeNotifier {
         ..sort((a, b) => a.timestampMs.compareTo(b.timestampMs));
     }
 
-    // Refresh capture shell for any code reading capture.frames (optional).
+    
     if (capture != null) {
       capture = PoseCapture(
         schemaVersion: capture!.schemaVersion,
@@ -210,13 +210,13 @@ class YogaMirrorController extends ChangeNotifier {
     if (!_disposed) notifyListeners();
   }
 
-  /// Ensure pose data around [timeMs] is loaded (seek / play head).
+  
   Future<void> ensureTimeLoaded(int timeMs) async {
     final meta = _meta;
     if (meta == null) return;
     final idx = meta.chunkIndexForTime(timeMs);
     await _loadChunkIndex(idx);
-    // Look-ahead ~1 chunk for smooth playback.
+    
     if (idx + 1 < meta.chunks.length) {
       unawaited(_loadChunkIndex(idx + 1));
     }
@@ -286,7 +286,7 @@ class YogaMirrorController extends ChangeNotifier {
       if (frames.isNotEmpty) {
         currentSampleFrame = _frameAtTime(currentTimeMs);
       }
-      // Prefetch while playing.
+      
       unawaited(ensureTimeLoaded(currentTimeMs + 1500));
     }
 
@@ -305,7 +305,7 @@ class YogaMirrorController extends ChangeNotifier {
     return [];
   }
 
-  /// Landmark indices for full-body detection validation
+  
   static const _fullBodyIndices = {11, 12, 23, 24, 25, 26, 27, 28};
   static const _torsoIndices = {11, 12, 23, 24};
 
@@ -388,7 +388,7 @@ class YogaMirrorController extends ChangeNotifier {
     return ((currentTimeMs - startTimestampMs) / durationMs).clamp(0, 1);
   }
 
-  /// How many pose chunks are ready (debug / UI).
+  
   int get loadedChunkCount => _loadedChunkIndices.length;
 
   int get totalChunkCount => _meta?.chunks.length ?? (frames.isEmpty ? 0 : 1);
@@ -398,7 +398,7 @@ class YogaMirrorController extends ChangeNotifier {
       throw StateError('No pose frames loaded');
     }
 
-    // Binary search nearest timestamp.
+    
     var lo = 0;
     var hi = frames.length - 1;
     while (lo < hi) {
@@ -409,7 +409,7 @@ class YogaMirrorController extends ChangeNotifier {
         hi = mid;
       }
     }
-    // lo is first >= timeMs (or last).
+    
     if (lo == 0) return frames.first;
     if (lo >= frames.length) return frames.last;
     final a = frames[lo - 1];
