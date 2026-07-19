@@ -93,6 +93,9 @@ let showSideJson = true; // skeleton JSON bên cạnh (offset)
 let fitMappedPoints = true; // scale/translate JSON by mapped bone pairs
 let snapMappedLandmarks = false; // force mapped JSON dots to VRM bone positions for checking
 let flipJsonDepth = true; // MediaPipe world Z front/back can be opposite of VRM
+let autoBodyYaw = true; // rotate the whole VRM toward JSON facing before limb correction
+let invertBodyYaw = false; // user override when MediaPipe handedness chooses the opposite facing normal
+let bodyYaw = 0;
 let hoverInfo = null;
 const calibratedRestDirs = new Map();
 const playbackRetargetAlpha = 0.5;
@@ -162,6 +165,8 @@ document.querySelector('#app').innerHTML = `
       <label><input id="flipJsonDepth" type="checkbox" checked> Đảo chiều sâu JSON Z (sửa trước/sau)</label>
       <label><input id="fitMappedPoints" type="checkbox" checked> Fit JSON bằng mapped bone points</label>
       <label><input id="snapMapped" type="checkbox"> Ép mapped JSON trùng bone VRM</label>
+      <label><input id="autoBodyYaw" type="checkbox" checked> Xoay nguyên thân VRM theo hướng JSON</label>
+      <label><input id="invertBodyYaw" type="checkbox"> Đảo hướng xoay thân VRM</label>
       <label><input id="flipJsonFacing" type="checkbox"> Xoay JSON 180° quanh Y (giữ shape)</label>
       <label><input id="yawMatchShoulders" type="checkbox"> Khớp hướng vai JSON↔VRM (chỉ yaw Y)</label>
     </section>
@@ -278,6 +283,19 @@ function initUi() {
   };
   $('snapMapped').onchange = (e) => {
     snapMappedLandmarks = e.target.checked;
+    if (frames[currentFrameIndex]) setFrame(currentFrameIndex);
+  };
+  $('autoBodyYaw').onchange = (e) => {
+    autoBodyYaw = e.target.checked;
+    if (!autoBodyYaw) {
+      bodyYaw = 0;
+      if (mixerRoot) mixerRoot.rotation.y = 0;
+    }
+    if (frames[currentFrameIndex]) setFrame(currentFrameIndex);
+  };
+  $('invertBodyYaw').onchange = (e) => {
+    invertBodyYaw = e.target.checked;
+    bodyYaw = 0;
     if (frames[currentFrameIndex]) setFrame(currentFrameIndex);
   };
   $('flipJsonFacing').onchange = () => {
@@ -1067,13 +1085,79 @@ function applyRetarget(frame) {
   if (useWorld) {
     const ok = applyKalidokit(frame);
     retargetMode = ok ? 'kalidokit+direction-correction' : 'kalidokit-fail→planar';
-    if (ok) applyDirectionChains(frame, false, 0.45);
-    else applyDirectionChains(frame, true);
+    if (ok) {
+      applyJsonBodyYaw(frame);
+      applyDirectionChains(frame, false, 0.45);
+    } else applyDirectionChains(frame, true);
   } else {
     retargetMode = 'planar-chain-only';
+    applyJsonBodyYaw(frame);
     applyDirectionChains(frame, true);
   }
   if (vrm.humanoid) vrm.humanoid.update(0);
+}
+
+function shortestAngleDelta(from, to) {
+  return Math.atan2(Math.sin(to - from), Math.cos(to - from));
+}
+
+function computeJsonBodyYaw(frame) {
+  const lHip = toWorldPoint(lm(frame, LANDMARK.leftHip));
+  const rHip = toWorldPoint(lm(frame, LANDMARK.rightHip));
+  const lSh = toWorldPoint(lm(frame, LANDMARK.leftShoulder));
+  const rSh = toWorldPoint(lm(frame, LANDMARK.rightShoulder));
+  const hipMid = mid3(lHip, rHip);
+  const shMid = mid3(lSh, rSh);
+  if (!hipMid || !shMid) return null;
+
+  const right = new THREE.Vector3();
+  let rightCount = 0;
+  if (lHip && rHip) { right.add(new THREE.Vector3().subVectors(rHip, lHip)); rightCount++; }
+  if (lSh && rSh) { right.add(new THREE.Vector3().subVectors(rSh, lSh)); rightCount++; }
+  if (!rightCount) return null;
+  right.multiplyScalar(1 / rightCount);
+
+  const up = new THREE.Vector3().subVectors(shMid, hipMid);
+  if (right.lengthSq() < 1e-8 || up.lengthSq() < 1e-8) return null;
+
+  let forward = new THREE.Vector3().crossVectors(right, up);
+  forward.y = 0;
+
+  // Feet give a stronger front/back hint when the torso normal is ambiguous.
+  const lHeel = toWorldPoint(lm(frame, LANDMARK.leftHeel));
+  const lToe = toWorldPoint(lm(frame, LANDMARK.leftFootIndex));
+  const rHeel = toWorldPoint(lm(frame, LANDMARK.rightHeel));
+  const rToe = toWorldPoint(lm(frame, LANDMARK.rightFootIndex));
+  const footForward = new THREE.Vector3();
+  let footCount = 0;
+  if (lHeel && lToe) { footForward.add(new THREE.Vector3().subVectors(lToe, lHeel)); footCount++; }
+  if (rHeel && rToe) { footForward.add(new THREE.Vector3().subVectors(rToe, rHeel)); footCount++; }
+  footForward.y = 0;
+  if (footCount && footForward.lengthSq() > 1e-8) {
+    footForward.normalize();
+    if (forward.lengthSq() < 1e-8 || Math.abs(forward.normalize().dot(footForward)) < 0.35) {
+      forward.copy(footForward);
+    }
+  }
+
+  if (forward.lengthSq() < 1e-8) return null;
+  forward.normalize();
+  let yaw = Math.atan2(forward.x, forward.z);
+  if (invertBodyYaw) yaw = -yaw;
+  return yaw;
+}
+
+function applyJsonBodyYaw(frame) {
+  if (!mixerRoot) return;
+  if (!autoBodyYaw) {
+    mixerRoot.rotation.y = 0;
+    return;
+  }
+  const targetYaw = computeJsonBodyYaw(frame);
+  if (targetYaw == null) return;
+  bodyYaw += shortestAngleDelta(bodyYaw, targetYaw) * currentRetargetAlpha(0.35);
+  mixerRoot.rotation.y = bodyYaw;
+  mixerRoot.updateMatrixWorld(true);
 }
 
 function arr(frame, world) {
@@ -1252,7 +1336,7 @@ function updateDebug(frame) {
     ? `${currentFrameIndex + 1}/${frames.length} @ ${frame.timestampMs ?? 0}ms`
     : '';
   $('debug').textContent =
-    `mode: ${retargetMode}\n` +
+    `mode: ${retargetMode} yaw:${bodyYaw.toFixed(2)}\n` +
     `VRM bone nodes: ${boneNodes.length}\n` +
     `L shoulder ${val(11)}\nR shoulder ${val(12)}\n` +
     `L hip ${val(23)}\nR hip ${val(24)}\n` +
