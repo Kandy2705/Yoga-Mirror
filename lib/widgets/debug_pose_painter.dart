@@ -1,9 +1,13 @@
 import 'package:flutter/material.dart';
 
 class DebugPosePainter extends CustomPainter {
-  DebugPosePainter({required this.points});
+  DebugPosePainter({
+    required this.points,
+    this.keypointColors = const {},
+  });
 
   final Map<String, Offset> points;
+  final Map<String, Color> keypointColors;
 
   static const _connections = <(String, String)>[
     ('leftEar', 'rightEar'),
@@ -25,6 +29,17 @@ class DebugPosePainter extends CustomPainter {
     ('rightHeel', 'rightFootIndex'),
   ];
 
+  static Color colorFromHex(String source) {
+    var value = source.trim().replaceFirst('#', '');
+    if (value.length == 6) {
+      value = 'FF$value';
+    }
+    if (value.length != 8) {
+      throw FormatException('Ma mau khong hop le: $source');
+    }
+    return Color(int.parse(value, radix: 16));
+  }
+
   @override
   void paint(Canvas canvas, Size size) {
     final linePaint = Paint()
@@ -32,7 +47,8 @@ class DebugPosePainter extends CustomPainter {
       ..strokeWidth = 3
       ..style = PaintingStyle.stroke
       ..strokeCap = StrokeCap.round;
-    final pointPaint = Paint()
+
+    final defaultPointPaint = Paint()
       ..color = const Color(0xFFFF5D8F)
       ..style = PaintingStyle.fill;
 
@@ -43,12 +59,22 @@ class DebugPosePainter extends CustomPainter {
         canvas.drawLine(from, to, linePaint);
       }
     }
-    for (final point in points.values) {
-      canvas.drawCircle(point, 5, pointPaint);
+
+    for (final entry in points.entries) {
+      final color = keypointColors[entry.key];
+      if (color != null) {
+        final paint = Paint()
+          ..color = color
+          ..style = PaintingStyle.fill;
+        canvas.drawCircle(entry.value, 6, paint);
+      } else {
+        canvas.drawCircle(entry.value, 5, defaultPointPaint);
+      }
     }
   }
 
   @override
   bool shouldRepaint(covariant DebugPosePainter oldDelegate) =>
-      oldDelegate.points != points;
+      oldDelegate.points != points ||
+      oldDelegate.keypointColors != keypointColors;
 }
